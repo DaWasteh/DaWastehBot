@@ -1,2 +1,5 @@
-twitchio
-aiohttp
+# Auf TwitchIO 3.x gepinnt - v2 (IRC) und v3 (EventSub) sind NICHT kompatibel.
+# Ungepinnt würde "pip install twitchio" inzwischen v3 ziehen und v2-Code brechen.
+twitchio>=3.2,<4
+aiohttp>=3.9.1
+python-dotenv>=1.0

@@ -1,0 +1,166 @@
+# 🐼 PandaBot
+
+Ein lokaler KI-Chatbot für Twitch. PandaBot verbindet deinen Kanal über
+[TwitchIO 3](https://twitchio.dev) (EventSub) mit einem lokalen Sprachmodell auf
+einem [llama-server](https://github.com/ggml-org/llama.cpp), folgt dem Chat,
+antwortet auf Erwähnungen und sorgt bei Stille für Unterhaltung – komplett
+offline, ohne Cloud-API.
+
+## Was kann der Bot?
+
+- **Mitlesen & antworten:** Reagiert, wenn jemand „PandaBot" schreibt oder ihn mit `@` erwähnt.
+- **Chatverlauf als Kontext:** Die letzten Nachrichten fließen in jede Antwort ein, damit der Bot dem Gespräch folgt.
+- **Live-Streamkontext:** Aktuelles Spiel und Stream-Titel werden automatisch über die Twitch-API geholt und in den Prompt eingebaut.
+- **Bei Stille aktiv:** Ist der Chat eine Weile ruhig (und der Stream live), wirft der Bot von selbst einen Gesprächsaufhänger ein.
+- **`!panda <frage>`-Befehl:** Direkter Draht zum Bot.
+- **Robust:** Ist der LLM-Server mal weg, schweigt der Bot einfach, statt abzustürzen.
+
+## ⚠️ Wichtig: TwitchIO 3 statt 2
+
+Das ursprüngliche Skript war für **TwitchIO 2** geschrieben (IRC, `initial_channels`,
+`channel.send`). Diese Version nutzt **TwitchIO 3**, wo IRC entfernt und durch
+**EventSub** ersetzt wurde. Das bedeutet ein anderes Auth-Modell: Statt eines
+einzelnen Chat-Tokens brauchst du eine **Twitch-Application** (Client-ID/Secret),
+und Bot- sowie Kanal-Account autorisieren sich einmalig über den Browser. Die
+Tokens werden danach automatisch in `.tio.tokens.json` gespeichert und erneuert –
+du musst das nur **einmal** machen.
+
+## Voraussetzungen
+
+- **Python 3.11 oder neuer** (TwitchIO 3 verlangt das)
+- Ein laufender **llama-server** mit deinem Modell (z. B. MiniCPM)
+- Zwei Twitch-Accounts: dein **Kanal** und ein separater **Bot-Account** (empfohlen)
+
+## Installation
+
+```bash
+git clone <dein-repo>
+cd pandabot
+
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
+pip install -r requirements.txt
+```
+
+## Konfiguration
+
+### 1. Twitch-Application anlegen
+
+1. Gehe zur [Twitch Developer Console](https://dev.twitch.tv/console) → **Register Your Application**.
+2. Trage als **OAuth Redirect URL** exakt ein: `http://localhost:4343/oauth/callback`
+3. Notiere dir **Client ID** und **Client Secret**.
+
+### 2. User-IDs herausfinden
+
+Du brauchst die **numerischen IDs** (nicht die Namen) deines Kanals und des
+Bot-Accounts. Anleitung dazu steht in den
+[TwitchIO-FAQ](https://twitchio.dev/en/latest/getting-started/faq.html#bot-id-owner-id).
+
+### 3. `.env` erstellen
+
+Kopiere die Vorlage und trage deine Werte ein:
+
+```bash
+cp .env.example .env
+```
+
+```env
+TWITCH_CLIENT_ID=deine_client_id
+TWITCH_CLIENT_SECRET=dein_client_secret
+TWITCH_BOT_ID=123456789       # User-ID des Bot-Accounts
+TWITCH_OWNER_ID=987654321     # Deine eigene User-ID (der Kanal)
+TWITCH_CHANNEL=dawasteh
+TWITCH_BOT_NAME=PandaBot
+
+LLM_SERVER_URL=http://127.0.0.1:1235/v1/chat/completions
+```
+
+Alle weiteren Werte (Temperatur, Idle-Zeit usw.) haben sinnvolle Defaults und
+sind in `.env.example` dokumentiert.
+
+## Einmalige Autorisierung (OAuth)
+
+Diesen Ablauf musst du **nur einmal** durchführen (oder wenn du die Scopes änderst):
+
+1. **Starte den Bot:**
+   ```bash
+   python pandabot.py
+   ```
+   Er startet im Hintergrund einen kleinen Webserver auf Port `4343`.
+
+2. **Bot-Account autorisieren:** Öffne ein **Inkognito-Fenster**, logge dich dort
+   als dein **Bot-Account** ein und rufe auf:
+   ```
+   http://localhost:4343/oauth?scopes=user:read:chat%20user:write:chat%20user:bot&force_verify=true
+   ```
+
+3. **Kanal autorisieren:** In deinem **normalen Browser** (eingeloggt als dein
+   **Kanal-Account**) rufe auf:
+   ```
+   http://localhost:4343/oauth?scopes=channel:bot&force_verify=true
+   ```
+
+Fertig. Ab jetzt verbindet sich der Bot bei jedem Start automatisch – die Tokens
+liegen in `.tio.tokens.json` und werden selbstständig erneuert.
+
+## LLM-Server starten
+
+Beispielhaft mit `llama-server` aus llama.cpp (Port an deine `.env` anpassen):
+
+```bash
+llama-server -m /pfad/zu/deinem-modell.gguf --port 1235 -c 4096
+```
+
+> **Tipp für kleine Modelle (~1B):** PandaBot setzt bereits Stop-Strings und eine
+> `repeat_penalty`, damit sich das Modell nicht selbst als andere Chatter
+> halluziniert oder im Kreis dreht. Falls die Antworten zu wiederholend wirken,
+> dreh `LLM_REPEAT_PENALTY` in der `.env` schrittweise hoch (z. B. auf `1.2`).
+> Werden sie zu wirr, senke `LLM_TEMPERATURE`.
+
+## Benutzung
+
+Ist beides gestartet (LLM-Server **und** Bot), läuft alles automatisch:
+
+- Schreibe im Chat `PandaBot, wie geht's?` → der Bot antwortet.
+- Nutze `!panda Was hältst du vom Spiel?` für einen direkten Befehl.
+- Bleibt der Chat ruhig, meldet sich der Bot nach `IDLE_THRESHOLD` Sekunden selbst.
+
+## Projektstruktur
+
+| Datei | Zweck |
+|-------|-------|
+| `pandabot.py` | Hauptlogik: Bot, LLM-Client, Stream-Kontext, Idle-Routine |
+| `config.py` | Lädt die Konfiguration aus `.env` / Umgebungsvariablen |
+| `.env.example` | Vorlage für deine Konfiguration |
+| `test_pandabot.py` | Tests für die Antwort-Aufbereitung |
+| `.github/workflows/ci.yml` | CI: Lint (ruff) + Tests auf Python 3.11–3.13 |
+
+## Konfigurationsreferenz
+
+| Variable | Default | Bedeutung |
+|----------|---------|-----------|
+| `LLM_TEMPERATURE` | `0.7` | Kreativität (höher = bunter, wirrer) |
+| `LLM_TOP_P` | `0.9` | Nucleus-Sampling |
+| `LLM_REPEAT_PENALTY` | `1.15` | Strafe gegen Wiederholungen |
+| `LLM_MAX_TOKENS` | `80` | Maximale Antwortlänge |
+| `LLM_TIMEOUT` | `20` | Sekunden, bis ein LLM-Aufruf abbricht |
+| `HISTORY_LENGTH` | `12` | Wie viele Chat-Zeilen als Kontext dienen |
+| `IDLE_THRESHOLD` | `300` | Sekunden Stille bis zur Eigeninitiative |
+| `CONTEXT_TTL` | `120` | Cache-Dauer für Titel/Spiel in Sekunden |
+
+## Sicherheit
+
+`.env`, `.tio.tokens.json` und die alte `config.json` stehen in `.gitignore` und
+dürfen **niemals** committet werden – sie enthalten deine Secrets bzw. Tokens.
+
+## Fehlersuche
+
+- **„Pflicht-Variable … fehlt":** Deine `.env` ist unvollständig – vergleiche mit `.env.example`.
+- **Bot startet, sagt aber nichts:** Läuft der `llama-server` unter der `LLM_SERVER_URL`? Check die Logs auf „llama-server nicht erreichbar".
+- **Keine Reaktion im Chat:** Wurde die Autorisierung für **beide** Accounts durchgeführt? Lösche notfalls `.tio.tokens.json` und wiederhole den OAuth-Schritt.
+- **Idle-Nachrichten kommen nicht:** Der Bot wird nur aktiv, wenn der Stream **live** ist.
+
+## Lizenz
+
+Frei verwendbar – passe es an deinen Stream an. 🐼
