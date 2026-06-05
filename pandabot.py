@@ -16,6 +16,7 @@ import logging
 import re
 import time
 from collections import deque
+from pathlib import Path
 from urllib.parse import quote
 
 import aiohttp
@@ -77,7 +78,17 @@ class LLMClient:
             "model": settings.llm_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"{user_prompt}\n\n"
+                        "WICHTIG: Gib NUR die finale Twitch-Chat-Antwort aus. "
+                        "Keine Analyse, keine Gedanken, kein Englisch, kein 'We need'."
+                    ),
+                },
+                # MiniCPM5/Thinking-Templates starten sonst gern mit CoT. Diese
+                # Prefix-Hilfe schließt den Thinking-Block und lenkt auf Finalausgabe.
+                {"role": "assistant", "content": "<think></think>\nAntwort:"},
             ],
             "temperature": settings.llm_temperature,
             "max_tokens": settings.llm_max_tokens,
@@ -86,7 +97,7 @@ class LLMClient:
             "stream": False,
             # llama.cpp / Thinking-Modelle: MiniCPM/Qwen-artige Modelle liefern
             # sonst oft nur reasoning_content und ein leeres message.content.
-            "chat_template_kwargs": {"enable_thinking": False},
+            "chat_template_kwargs": {"enable_thinking": False, "thinking": False},
             "reasoning_budget": 0,
         }
         # llama.cpp-spezifisch, hilft kleinen Modellen gegen Wiederholungen.
@@ -117,6 +128,10 @@ class LLMClient:
         sanitized = self._sanitize(reply)
         if not sanitized:
             LOGGER.warning("LLM-Rohantwort war leer/unbrauchbar: %r", reply)
+            return None
+        if self._looks_like_reasoning(sanitized):
+            LOGGER.warning("LLM-Antwort sah nach Reasoning aus und wurde blockiert: %r", sanitized)
+            return None
         return sanitized
 
     def _sanitize(self, text: str | None) -> str | None:
@@ -128,12 +143,17 @@ class LLMClient:
 
         # Thinking-Modelle liefern oft interne Gedanken vor der eigentlichen Antwort.
         text = re.sub(r"(?is)<think>.*?</think>", "", text).strip()
-        if text.lower().startswith("<think>"):
-            text = text[len("<think>") :].strip()
+        text = re.sub(r"(?is)</?think>", "", text).strip()
         text = re.sub(r"\s+", " ", text).strip()
 
+        # Wenn wir die Ausgabe mit "Antwort:" geprefillt haben, nur den finalen
+        # Teil danach behalten.
+        marker_match = re.search(r"(?i)(?:^|\s)(?:finale?\s+)?antwort\s*:\s*", text)
+        if marker_match:
+            text = text[marker_match.end() :].strip()
+
         # Manche Modelle stellen den eigenen Namen voran ("PandaBot: ...").
-        for prefix in (f"{settings.bot_name}:", "PandaBot:", "Bot:", "Assistant:"):
+        for prefix in (f"{settings.bot_name}:", "PandaBot:", "Bot:", "Assistant:", "Antwort:"):
             if text.lower().startswith(prefix.lower()):
                 text = text[len(prefix) :].strip()
 
@@ -149,6 +169,87 @@ class LLMClient:
             text = text[: settings.max_message_length - 1].rstrip() + "…"
 
         return text
+
+    def _looks_like_reasoning(self, text: str) -> bool:
+        """Verhindert, dass Chain-of-Thought/Meta-Analyse in Twitch landet."""
+        lowered = text.lower().lstrip()
+        reasoning_starts = (
+            "we need",
+            "we should",
+            "the user",
+            "the prompt",
+            "i need to",
+            "i should",
+            "need to respond",
+            "okay,",
+            "analyse",
+            "analysis",
+        )
+        return lowered.startswith(reasoning_starts)
+
+
+# --------------------------------------------------------------------------- #
+#  Lokales User-Gedächtnis (Markdown pro Twitch-User)
+# --------------------------------------------------------------------------- #
+class UserMemoryStore:
+    """Speichert kompakte, lokale Markdown-Notizen pro Twitch-User."""
+
+    def __init__(self, root: str) -> None:
+        self.root = Path(root)
+
+    def _path(self, user_id: str) -> Path:
+        safe_id = re.sub(r"[^0-9A-Za-z_-]", "_", str(user_id))
+        return self.root / f"{safe_id}.md"
+
+    def load(self, user_id: str, display_name: str) -> str:
+        path = self._path(user_id)
+        if not path.exists():
+            return "(keine gespeicherten Notizen)"
+        try:
+            return path.read_text(encoding="utf-8").strip() or "(keine gespeicherten Notizen)"
+        except OSError:
+            LOGGER.exception("Konnte User-Gedächtnis nicht lesen: %s", path)
+            return "(Gedächtnis gerade nicht lesbar)"
+
+    def append(self, user_id: str, display_name: str, notes: str) -> None:
+        cleaned = self._clean_notes(notes)
+        if not cleaned:
+            return
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self._path(user_id)
+        if path.exists():
+            current = path.read_text(encoding="utf-8")
+        else:
+            current = (
+                f"# User-Gedächtnis: {display_name}\n\n"
+                f"- Twitch-User-ID: {user_id}\n"
+                f"- Anzeigename zuletzt gesehen: {display_name}\n\n"
+                "## Notizen\n"
+            )
+
+        current_lower = current.lower()
+        new_lines = [line for line in cleaned.splitlines() if line.lower() not in current_lower]
+        if not new_lines:
+            return
+
+        if not current.endswith("\n"):
+            current += "\n"
+        current += "\n".join(new_lines) + "\n"
+        path.write_text(current, encoding="utf-8")
+        LOGGER.info("User-Gedächtnis aktualisiert: %s", path)
+
+    def _clean_notes(self, notes: str) -> str:
+        lines: list[str] = []
+        for raw in notes.splitlines():
+            line = raw.strip()
+            if not line or line.lower() in {"keine", "keine."}:
+                continue
+            line = re.sub(r"^(?:[-*]\s*)?", "- ", line)
+            if len(line) > 240:
+                line = line[:239].rstrip() + "…"
+            lines.append(line)
+        return "\n".join(lines[:3])
 
 
 # --------------------------------------------------------------------------- #
@@ -214,11 +315,16 @@ def build_system_prompt(ctx: StreamContext) -> str:
     return (
         f"Du bist {settings.bot_name}, ein freundlicher, witziger Chatbot im "
         f"Twitch-Stream von {settings.channel_name}. "
-        f"Der Streamer spielt gerade '{ctx.game}'. Der Stream-Titel ist '{ctx.title}'. "
-        "Regeln: Antworte IMMER auf Deutsch. Maximal ein bis zwei kurze Sätze. "
+        f"Aktueller Stream-Kontext: Spiel/Kategorie='{ctx.game}', Titel='{ctx.title}'. "
+        "Regeln: Antworte IMMER auf Deutsch. Meist ein bis zwei kurze Sätze. "
+        "Beantworte die aktuelle Frage direkt und natürlich; allgemeine Fragen darfst du ganz normal beantworten. "
+        "Wenn nach dem heutigen Stream oder Thema gefragt wird, nutze den Stream-Kontext. "
+        "Der Chatverlauf ist nur Zusatzkontext: fasse ihn nur zusammen, wenn ausdrücklich nach Chat, Stimmung, Verlauf oder Zusammenfassung gefragt wird. "
+        "Persönliche Notizen zum Fragesteller sind hilfreiche Präferenzen, keine Pflichtliste. "
+        "Beziehe dich auf den Fragesteller, wenn es passt, aber übertreib es nicht mit Namen. "
+        "Nutze Spiel und Titel nur als Kontext, aber kopiere keine Deko, Commands, Emotes oder Insider wie XD/420 aus dem Titel. "
         "Sei locker und unterhaltsam, aber nie beleidigend. "
-        "Schreibe nur deine eigene Antwort, kein Rollenspiel, keine Namen voranstellen. "
-        "Keine Emotes-Codes erfinden."
+        "Schreibe nur deine eigene finale Antwort, kein Rollenspiel, keine Namen voranstellen, keine Analyse."
     )
 
 
@@ -236,6 +342,7 @@ class PandaBot(commands.Bot):
         )
         self.llm = LLMClient()
         self.context = StreamContext(ttl=settings.context_ttl)
+        self.user_memory = UserMemoryStore(settings.user_memory_dir)
 
         # Rollierender Chatverlauf (deque begrenzt automatisch die Länge).
         self.chat_history: deque[str] = deque(maxlen=settings.history_length)
@@ -382,6 +489,97 @@ class PandaBot(commands.Bot):
                 return True
         return False
 
+    def _is_chat_context_question(self, text: str) -> bool:
+        lowered = text.lower()
+        keywords = (
+            "chat",
+            "stimmung",
+            "verlauf",
+            "zusammenfass",
+            "was war los",
+            "was ging",
+            "was macht ihr",
+            "was machen die leute",
+        )
+        return any(keyword in lowered for keyword in keywords)
+
+    def _is_stream_context_question(self, text: str) -> bool:
+        lowered = text.lower()
+        return (
+            "stream" in lowered
+            or "streamthema" in lowered
+            or "thema" in lowered
+            or "handelt" in lowered
+            or ("um was" in lowered and "heute" in lowered)
+        )
+
+    def _stream_context_answer(self) -> str:
+        title_parts: list[str] = []
+        for raw in self.context.title.split("|"):
+            part = raw.strip()
+            if not part or part.startswith("[") or "!" in part:
+                continue
+            part = re.sub(r"(?i)\bxd\b", "", part)
+            part = re.sub(r"[^\w\s./+#-]", "", part).strip(" -")
+            if len(part) < 4 or not re.search(r"[A-Za-zÄÖÜäöüß]", part):
+                continue
+            title_parts.append(part)
+
+        if title_parts:
+            detail = ", ".join(title_parts[:2])
+            return f"Heute geht’s um {self.context.game}; laut Titel vor allem: {detail}."
+        return f"Heute geht’s laut Twitch-Kategorie um {self.context.game}; der genaue Fokus ergibt sich gerade aus dem Stream."
+
+    def _format_recent_history(self, *, include_for_context: bool) -> str:
+        previous = list(self.chat_history)[:-1]
+        if not previous:
+            return "(noch keine vorherigen Chatnachrichten)"
+        limit = settings.history_length if include_for_context else min(4, settings.history_length)
+        return "\n".join(previous[-limit:])
+
+    async def _remember_user_later(
+        self,
+        *,
+        user_id: str,
+        author: str,
+        user_message: str,
+        bot_reply: str,
+    ) -> None:
+        if not settings.user_memory_enabled:
+            return
+
+        existing = self.user_memory.load(user_id, author)
+        memory_system = (
+            "Du pflegst ein kompaktes, lokales Gedächtnis für einen Twitch-Chatbot. "
+            "Extrahiere NUR dauerhafte, hilfreiche Fakten oder Präferenzen über den User: "
+            "Name/Anrede, Sprache, Interessen, Humor, technische Vorlieben, wiederkehrende Wünsche. "
+            "Speichere KEINE einmaligen Fragen, keine temporären Themen, keine sensiblen Daten und keine Geheimnisse. "
+            "Wenn nichts Neues dauerhaft Nützliches dabei ist, antworte exakt: KEINE. "
+            "Sonst antworte mit 1-3 kurzen Markdown-Bullets."
+        )
+        memory_prompt = (
+            f"User: {author} ({user_id})\n\n"
+            f"Bestehende Notizen:\n{existing[-1600:]}\n\n"
+            f"Neue User-Nachricht:\n{user_message}\n\n"
+            f"Bot-Antwort:\n{bot_reply}\n\n"
+            "Welche neuen dauerhaften Notizen sollen gespeichert werden?"
+        )
+
+        try:
+            notes = await self.llm.complete(memory_system, memory_prompt)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("User-Gedächtnis konnte nicht ausgewertet werden")
+            return
+
+        if not notes or notes.strip().lower().startswith("keine"):
+            return
+        if self.llm._looks_like_reasoning(notes):
+            return
+        try:
+            self.user_memory.append(user_id, author, notes)
+        except OSError:
+            LOGGER.exception("User-Gedächtnis konnte nicht gespeichert werden")
+
     async def _respond(
         self,
         payload: twitchio.ChatMessage,
@@ -402,15 +600,33 @@ class PandaBot(commands.Bot):
             if self._broadcaster:
                 await self.context.refresh(self, self._broadcaster)
 
-            system_prompt = build_system_prompt(self.context)
-            history = "\n".join(self.chat_history)
-            user_prompt = (
-                f"Aktueller Chatverlauf:\n{history}\n\n"
-                f"{author} hat dich gerade angesprochen: '{trigger}'\n"
-                f"Antworte direkt und passend auf {author}."
-            )
+            if self._is_stream_context_question(trigger):
+                reply = self._stream_context_answer()
+            else:
+                system_prompt = build_system_prompt(self.context)
+                wants_chat_context = self._is_chat_context_question(trigger)
+                history = self._format_recent_history(include_for_context=wants_chat_context)
+                memory = self.user_memory.load(payload.chatter.id, author)
+                if wants_chat_context:
+                    task = (
+                        "Die Anfrage fragt nach Chat/Stimmung/Verlauf: fasse die vorherigen Chatnachrichten konkret zusammen. "
+                        "Wenn wenig los war oder hauptsächlich Bot-Tests liefen, sag das ehrlich."
+                    )
+                else:
+                    task = (
+                        "Beantworte die aktuelle Anfrage direkt. Nutze vorherige Chatnachrichten und User-Notizen nur, wenn sie helfen; "
+                        "fasse den Chat nicht ungefragt zusammen."
+                    )
+                user_prompt = (
+                    f"Fragesteller: {author}\n"
+                    f"User-Notizen zu {author}:\n{memory[-1800:]}\n\n"
+                    f"Optionale vorherige Chatnachrichten (älteste zuerst):\n{history}\n\n"
+                    f"Aktuelle Anfrage, die du beantworten musst: {trigger}\n\n"
+                    f"Aufgabe: {task}\n"
+                    "Schreibe jetzt nur die finale Antwort an den Fragesteller."
+                )
 
-            reply = await self.llm.complete(system_prompt, user_prompt)
+                reply = await self.llm.complete(system_prompt, user_prompt)
 
         if not reply:
             LOGGER.warning("LLM hat keine brauchbare Antwort geliefert")
@@ -420,6 +636,14 @@ class PandaBot(commands.Bot):
             # respond() sendet die Nachricht in den Kanal der Ursprungsnachricht.
             await payload.respond(reply)
             LOGGER.info("Antwort gesendet: %s", reply)
+            asyncio.create_task(
+                self._remember_user_later(
+                    user_id=payload.chatter.id,
+                    author=author,
+                    user_message=trigger,
+                    bot_reply=reply,
+                )
+            )
         except Exception:  # noqa: BLE001
             LOGGER.exception("Konnte Nachricht nicht senden")
 
@@ -469,17 +693,38 @@ class PandaBot(commands.Bot):
         author = ctx.chatter.display_name or ctx.chatter.name or str(ctx.chatter.id)
         if self._broadcaster:
             await self.context.refresh(self, self._broadcaster)
-        system_prompt = build_system_prompt(self.context)
-        history = "\n".join(self.chat_history)
-        user_prompt = (
-            f"Aktueller Chatverlauf:\n{history}\n\n"
-            f"{author} fragt: '{frage}'\nAntworte direkt auf {author}."
-        )
         async with self._llm_lock:
-            reply = await self.llm.complete(system_prompt, user_prompt)
+            if self._is_stream_context_question(frage):
+                reply = self._stream_context_answer()
+            else:
+                system_prompt = build_system_prompt(self.context)
+                wants_chat_context = self._is_chat_context_question(frage)
+                history = self._format_recent_history(include_for_context=wants_chat_context)
+                memory = self.user_memory.load(ctx.chatter.id, author)
+                if wants_chat_context:
+                    task = "Fasse die letzten Chatnachrichten konkret zusammen; wenn wenig los war, sag das ehrlich."
+                else:
+                    task = "Beantworte die aktuelle Anfrage direkt und fasse den Chat nicht ungefragt zusammen."
+                user_prompt = (
+                    f"Fragesteller: {author}\n"
+                    f"User-Notizen zu {author}:\n{memory[-1800:]}\n\n"
+                    f"Optionale vorherige Chatnachrichten (älteste zuerst):\n{history}\n\n"
+                    f"Aktuelle Anfrage, die du beantworten musst: {frage}\n\n"
+                    f"Aufgabe: {task}\n"
+                    "Schreibe jetzt nur die finale Antwort an den Fragesteller."
+                )
+                reply = await self.llm.complete(system_prompt, user_prompt)
         answer = reply or "Mein KI-Hirn macht gerade Pause 🐼"
         await ctx.reply(answer)
         LOGGER.info("Command-Antwort gesendet: %s", answer)
+        asyncio.create_task(
+            self._remember_user_later(
+                user_id=ctx.chatter.id,
+                author=author,
+                user_message=frage,
+                bot_reply=answer,
+            )
+        )
 
 
 # --------------------------------------------------------------------------- #

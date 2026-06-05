@@ -69,6 +69,12 @@ class Settings:
     idle_threshold: int = field(default_factory=lambda: int(os.getenv("IDLE_THRESHOLD", "300")))
     context_ttl: int = field(default_factory=lambda: int(os.getenv("CONTEXT_TTL", "120")))
     max_message_length: int = 480  # Twitch-Limit ist 500; etwas Puffer.
+    user_memory_dir: str = field(default_factory=lambda: os.getenv("USER_MEMORY_DIR", "user_memories"))
+    user_memory_enabled: bool = field(
+        default_factory=lambda: (
+            os.getenv("USER_MEMORY_ENABLED", "true").lower() not in ("0", "false", "no")
+        )
+    )
 
 
 settings = Settings()
