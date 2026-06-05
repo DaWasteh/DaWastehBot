@@ -55,10 +55,10 @@ async def main() -> None:
         await client.login()
         users = await client.fetch_users(logins=logins)
 
-    found = {user.name.lower(): user for user in users}
+    found = {user.name.lower(): user for user in users if user.name is not None}
     for login in logins:
         user = found.get(login)
-        if user is None:
+        if user is None or user.name is None:
             print(f"Nicht gefunden: {login}")
             continue
         print(f"User: {user.name} - ID: {user.id}")

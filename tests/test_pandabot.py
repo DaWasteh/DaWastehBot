@@ -120,7 +120,15 @@ def test_language_instruction_current_message_overrides_memory_language() -> Non
     assert "darf die aktuelle Antwortsprache NICHT überschreiben" in instruction
 
 
-def test_apply_online_llm_backend_uses_google_profile() -> None:
+def test_apply_online_llm_backend_uses_google_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "GOOGLE_LLM_MODEL",
+        "GOOGLE_LLM_MAX_TOKENS",
+        "GOOGLE_LLM_TIMEOUT",
+        "GOOGLE_LLM_SERVER_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     settings_obj = Settings()
     settings_obj.google_api_key = "test-key"
 

@@ -19,6 +19,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 import aiohttp
@@ -410,7 +411,7 @@ class LLMClient:
             "Verwende exakt die im Prompt geforderte Antwortsprache; kein ungefragter Sprachwechsel."
         )
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": settings.llm_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -616,7 +617,11 @@ class UserMemoryStore:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self._path(user_id)
         try:
-            current = path.read_text(encoding="utf-8") if path.exists() else self._initial_content(user_id, display_name)
+            current = (
+                path.read_text(encoding="utf-8")
+                if path.exists()
+                else self._initial_content(user_id, display_name)
+            )
         except OSError:
             LOGGER.exception("Konnte User-Gedächtnis nicht für Sprachprofil lesen: %s", path)
             return
@@ -832,7 +837,9 @@ class PandaBot(commands.Bot):
             "2) Normal als STREAMER/Kanal öffnen: http://localhost:4343/oauth?scopes=%s&force_verify=true",
             owner_scopes,
         )
-        LOGGER.warning("Danach PandaBot mit Strg+C beenden und erneut mit 'python pandabot.py' starten.")
+        LOGGER.warning(
+            "Danach PandaBot mit Strg+C beenden und erneut mit 'python pandabot.py' starten."
+        )
 
     async def _subscribe_chat(self) -> None:
         subscription = eventsub.ChatMessageSubscription(
@@ -843,7 +850,9 @@ class PandaBot(commands.Bot):
         self._chat_subscription_active = True
         LOGGER.info("Chat-Subscription für Kanal %s aktiv", settings.channel_name)
 
-    async def event_oauth_authorized(self, payload: twitchio.authentication.UserTokenPayload) -> None:
+    async def event_oauth_authorized(
+        self, payload: twitchio.authentication.UserTokenPayload
+    ) -> None:
         await super().event_oauth_authorized(payload)
         await self.save_tokens()
         LOGGER.info(
@@ -952,7 +961,9 @@ class PandaBot(commands.Bot):
         # Frage nach dem Stream-Inhalt.
         if re.search(r"\b(witz|geschichte|story|erzähl|erzaehl|witzig|joke)\b", lowered):
             return False
-        if re.search(r"\b(testen|ideen|vorschläge|vorschlaege|was können wir|was koennen wir)\b", lowered):
+        if re.search(
+            r"\b(testen|ideen|vorschläge|vorschlaege|was können wir|was koennen wir)\b", lowered
+        ):
             return False
         if "nicht" in lowered or "nichts mit" in lowered:
             return False
@@ -1012,7 +1023,12 @@ class PandaBot(commands.Bot):
             if language == LANGUAGE_ENGLISH:
                 return "Probably too much model caffeine and not enough polish. But hey, we’re debugging me live."
             return "Vermutlich zu viel Modell-Koffein und zu wenig Feinschliff. Aber hey, wir debuggen mich ja gerade live."
-        if "google" in lowered or "websuche" in lowered or "suche" in lowered or "search" in lowered:
+        if (
+            "google" in lowered
+            or "websuche" in lowered
+            or "suche" in lowered
+            or "search" in lowered
+        ):
             if language == LANGUAGE_ENGLISH:
                 return "I can’t live-google from here, but I can still give you a quick take from what I know."
             if language == LANGUAGE_SWEDISH:
@@ -1204,9 +1220,12 @@ class PandaBot(commands.Bot):
             memory = self.user_memory.load(payload.chatter.id, author)
             dominant_language = self.user_memory.dominant_language(memory)
             if settings.user_memory_enabled:
-                self.user_memory.update_language_profile(payload.chatter.id, author, current_language)
+                self.user_memory.update_language_profile(
+                    payload.chatter.id, author, current_language
+                )
             language_instruction = language_reply_instruction(current_language, dominant_language)
 
+            reply: str | None
             if self._is_stream_context_question(trigger):
                 reply = self._stream_context_answer(current_language)
             else:
@@ -1313,6 +1332,7 @@ class PandaBot(commands.Bot):
                 self.user_memory.update_language_profile(ctx.chatter.id, author, current_language)
             language_instruction = language_reply_instruction(current_language, dominant_language)
 
+            reply: str | None
             if self._is_stream_context_question(frage):
                 reply = self._stream_context_answer(current_language)
             else:
@@ -1336,7 +1356,8 @@ class PandaBot(commands.Bot):
         answer = (
             self._polish_reply(reply, trigger=frage, author=author, language=current_language)
             if reply
-            else self._fallback_reply(frage, current_language) or "Mein KI-Hirn macht gerade Pause 🐼"
+            else self._fallback_reply(frage, current_language)
+            or "Mein KI-Hirn macht gerade Pause 🐼"
         )
         await ctx.reply(answer)
         LOGGER.info("Command-Antwort gesendet: %s", answer)
