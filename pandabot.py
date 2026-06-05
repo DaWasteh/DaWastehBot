@@ -16,6 +16,7 @@ import logging
 import re
 import time
 from collections import deque
+from urllib.parse import quote
 
 import aiohttp
 import twitchio
@@ -25,6 +26,9 @@ from twitchio.ext import commands, routines
 from config import settings
 
 LOGGER: logging.Logger = logging.getLogger("pandabot")
+
+BOT_SCOPES = "user:read:chat user:write:chat user:bot"
+OWNER_SCOPES = "channel:bot"
 
 
 # --------------------------------------------------------------------------- #
@@ -230,6 +234,7 @@ class PandaBot(commands.Bot):
         self._bot_login: str | None = None
 
         self._last_activity = time.monotonic()
+        self._chat_subscription_active = False
         # Lock statt bool-Flag: verhindert sauber parallele LLM-Aufrufe.
         self._llm_lock = asyncio.Lock()
 
@@ -242,12 +247,48 @@ class PandaBot(commands.Bot):
         """
         self._broadcaster = self.create_partialuser(settings.owner_id)
 
+        if not self._has_required_user_tokens():
+            self._log_oauth_instructions()
+            return
+
+        await self._subscribe_chat()
+
+    def _has_required_user_tokens(self) -> bool:
+        tokens = self._http._tokens  # TwitchIO ManagedHTTPClient; enthält User-Tokens nach OAuth.
+        return settings.bot_id in tokens and settings.owner_id in tokens
+
+    def _log_oauth_instructions(self) -> None:
+        bot_scopes = quote(BOT_SCOPES)
+        owner_scopes = quote(OWNER_SCOPES)
+        LOGGER.warning("Noch nicht autorisiert: Bot- und/oder Kanal-Token fehlen.")
+        LOGGER.warning("Lass dieses Fenster offen und autorisiere jetzt beide Accounts:")
+        LOGGER.warning(
+            "1) Inkognito als BOT-Account öffnen: http://localhost:4343/oauth?scopes=%s&force_verify=true",
+            bot_scopes,
+        )
+        LOGGER.warning(
+            "2) Normal als STREAMER/Kanal öffnen: http://localhost:4343/oauth?scopes=%s&force_verify=true",
+            owner_scopes,
+        )
+        LOGGER.warning("Danach PandaBot mit Strg+C beenden und erneut mit 'python pandabot.py' starten.")
+
+    async def _subscribe_chat(self) -> None:
         subscription = eventsub.ChatMessageSubscription(
             broadcaster_user_id=settings.owner_id,
             user_id=settings.bot_id,
         )
         await self.subscribe_websocket(payload=subscription)
+        self._chat_subscription_active = True
         LOGGER.info("Chat-Subscription für Kanal %s aktiv", settings.channel_name)
+
+    async def event_oauth_authorized(self, payload: twitchio.authentication.UserTokenPayload) -> None:
+        await super().event_oauth_authorized(payload)
+        await self.save_tokens()
+        LOGGER.info(
+            "OAuth erfolgreich für %s (%s). Token wurde gespeichert.",
+            payload.user_login or "?",
+            payload.user_id or "?",
+        )
 
     async def event_ready(self) -> None:
         await self.llm.open()
@@ -258,7 +299,8 @@ class PandaBot(commands.Bot):
         # Kontext einmal initial laden, damit der erste Prompt schon stimmt.
         if self._broadcaster:
             await self.context.refresh(self, self._broadcaster)
-        self.idle_chatter.start()
+        if self._chat_subscription_active:
+            self.idle_chatter.start()
         LOGGER.info(
             "PandaBot (%s, Account: %s) ist online und mit %s verbunden!",
             settings.bot_name,
