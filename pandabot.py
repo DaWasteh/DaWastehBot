@@ -83,7 +83,8 @@ class LLMClient:
                     "content": (
                         f"{user_prompt}\n\n"
                         "WICHTIG: Gib NUR die finale Twitch-Chat-Antwort aus. "
-                        "Keine Analyse, keine Gedanken, kein Englisch, kein 'We need'."
+                        "Sprich den Fragesteller direkt mit du an, nie in der dritten Person. "
+                        "Keine Analyse, keine Gedanken, kein Englisch, kein Markdown/Fettdruck, kein Wiederholen der Frage, kein 'We need'."
                     ),
                 },
                 # MiniCPM5/Thinking-Templates starten sonst gern mit CoT. Diese
@@ -157,8 +158,12 @@ class LLMClient:
             if text.lower().startswith(prefix.lower()):
                 text = text[len(prefix) :].strip()
 
+        # Markdown-/Chat-Artefakte entfernen.
+        text = re.sub(r"\*\*(.*?)\*\*", r"\1", text).strip()
+        text = re.sub(r"(?i)^final(?:e)? antwort\s*:\s*", "", text).strip()
+
         # Umschließende Anführungszeichen entfernen.
-        if len(text) >= 2 and text[0] in "\"'" and text[-1] in "\"'":
+        while len(text) >= 2 and text[0] in "\"'“”„" and text[-1] in "\"'“”„":
             text = text[1:-1].strip()
 
         if not text:
@@ -181,9 +186,10 @@ class LLMClient:
             "i need to",
             "i should",
             "need to respond",
-            "okay,",
             "analyse",
             "analysis",
+            "let's break it down",
+            "let us break it down",
         )
         return lowered.startswith(reasoning_starts)
 
@@ -316,15 +322,19 @@ def build_system_prompt(ctx: StreamContext) -> str:
         f"Du bist {settings.bot_name}, ein freundlicher, witziger Chatbot im "
         f"Twitch-Stream von {settings.channel_name}. "
         f"Aktueller Stream-Kontext: Spiel/Kategorie='{ctx.game}', Titel='{ctx.title}'. "
-        "Regeln: Antworte IMMER auf Deutsch. Meist ein bis zwei kurze Sätze. "
-        "Beantworte die aktuelle Frage direkt und natürlich; allgemeine Fragen darfst du ganz normal beantworten. "
+        "Stil: natürlich, direkt und conversational wie ein guter GPT-4o-Chat, aber als Twitch-Chatbot. "
+        "Antworte IMMER auf Deutsch. Meist 1-2 kurze Sätze; bei Geschichten oder Witzen darf es etwas länger sein. "
+        "Beantworte genau die aktuelle Bitte: Wenn jemand einen Witz oder eine Geschichte will, erzähl sie; wenn jemand eine Erklärung will, erklär kurz. "
+        "Bei frechen oder bösen Witzen darfst du trockenen, leicht schwarzen Humor nutzen, aber keine Hassrede und keine stumpfen Beleidigungen gegen echte Personen. "
+        "Wenn nach Google/Websuche/Live-Recherche gefragt wird, sag ehrlich kurz, dass du hier keinen Browserzugriff hast, und biete stattdessen eine kurze Einordnung aus vorhandenem Wissen an. "
         "Wenn nach dem heutigen Stream oder Thema gefragt wird, nutze den Stream-Kontext. "
         "Der Chatverlauf ist nur Zusatzkontext: fasse ihn nur zusammen, wenn ausdrücklich nach Chat, Stimmung, Verlauf oder Zusammenfassung gefragt wird. "
-        "Persönliche Notizen zum Fragesteller sind hilfreiche Präferenzen, keine Pflichtliste. "
-        "Beziehe dich auf den Fragesteller, wenn es passt, aber übertreib es nicht mit Namen. "
+        "Persönliche Notizen zum Fragesteller sind nur leise Hinweise, keine Pflichtliste und kein Gesprächsthema. "
+        "Sprich den Fragesteller direkt mit 'du' an; rede nicht in der dritten Person über ihn. "
+        "Kein steifer Assistententon, keine Meta-Sätze wie 'ich antworte jetzt', keine Analyse, kein Wiederholen der Frage, kein Markdown/Fettdruck. "
         "Nutze Spiel und Titel nur als Kontext, aber kopiere keine Deko, Commands, Emotes oder Insider wie XD/420 aus dem Titel. "
-        "Sei locker und unterhaltsam, aber nie beleidigend. "
-        "Schreibe nur deine eigene finale Antwort, kein Rollenspiel, keine Namen voranstellen, keine Analyse."
+        "Emojis sparsam verwenden, höchstens eins, und nur wenn es wirklich passt. "
+        "Sei locker und unterhaltsam, aber nie beleidigend. Schreibe nur deine finale Antwort."
     )
 
 
@@ -505,13 +515,27 @@ class PandaBot(commands.Bot):
 
     def _is_stream_context_question(self, text: str) -> bool:
         lowered = text.lower()
-        return (
-            "stream" in lowered
-            or "streamthema" in lowered
-            or "thema" in lowered
-            or "handelt" in lowered
-            or ("um was" in lowered and "heute" in lowered)
+        # Nicht auf jede Erwähnung von "Stream/Thema" routen: "erzähl einen Witz,
+        # der nichts mit dem Streamthema zu tun hat" ist eine Witz-Anfrage, keine
+        # Frage nach dem Stream-Inhalt.
+        if re.search(r"\b(witz|geschichte|story|erzähl|erzaehl|witzig|joke)\b", lowered):
+            return False
+        if re.search(r"\b(testen|ideen|vorschläge|vorschlaege|was können wir|was koennen wir)\b", lowered):
+            return False
+        if "nicht" in lowered or "nichts mit" in lowered:
+            return False
+
+        patterns = (
+            r"^\s*um\s+was\s+gehts?n?\s*\??\s*$",
+            r"\bum\s+was\s+geht(?:'s|s|\s+es)?.*\bstream\b",
+            r"\bwas\s+geht(?:'s|s|\s+es)?.*\bstream\b",
+            r"\b(wovon|von\s+was)\s+handelt.*\bstream\b",
+            r"\bwas\s+ist.*\b(thema|streamthema)\b",
+            r"\bwas\s+läuft.*\b(heute|stream)\b",
+            r"\bwas\s+wird.*\bgestreamt\b",
+            r"\bwelches\s+thema\b",
         )
+        return any(re.search(pattern, lowered) for pattern in patterns)
 
     def _stream_context_answer(self) -> str:
         title_parts: list[str] = []
@@ -519,7 +543,7 @@ class PandaBot(commands.Bot):
             part = raw.strip()
             if not part or part.startswith("[") or "!" in part:
                 continue
-            part = re.sub(r"(?i)\bxd\b", "", part)
+            part = re.sub(r"(?i)\bxd\b|\b420\b", "", part)
             part = re.sub(r"[^\w\s./+#-]", "", part).strip(" -")
             if len(part) < 4 or not re.search(r"[A-Za-zÄÖÜäöüß]", part):
                 continue
@@ -527,8 +551,51 @@ class PandaBot(commands.Bot):
 
         if title_parts:
             detail = ", ".join(title_parts[:2])
-            return f"Heute geht’s um {self.context.game}; laut Titel vor allem: {detail}."
-        return f"Heute geht’s laut Twitch-Kategorie um {self.context.game}; der genaue Fokus ergibt sich gerade aus dem Stream."
+            return f"Grob geht’s um {self.context.game}; heute offenbar mit Fokus auf {detail}."
+        return f"Grob geht’s heute um {self.context.game}; der genaue Fokus ergibt sich gerade im Stream."
+
+    def _fallback_reply(self, trigger: str) -> str | None:
+        lowered = trigger.lower()
+        if "was geht" in lowered:
+            return "Alles entspannt, ich häng im Chat rum und warte auf Chaos. Was geht bei dir?"
+        if "was stimmt nicht" in lowered:
+            return "Vermutlich zu viel Modell-Koffein und zu wenig Feinschliff. Aber hey, wir debuggen mich ja gerade live."
+        if "google" in lowered or "websuche" in lowered or "suche" in lowered:
+            return "Live googeln kann ich hier nicht direkt, aber ich kann dir aus meinem Wissen kurz einordnen, worum es geht."
+        return None
+
+    def _polish_reply(self, reply: str, *, trigger: str, author: str) -> str:
+        text = reply.strip()
+        text = re.sub(r"\*\*(.*?)\*\*", r"\1", text).strip()
+
+        # Wenn das Modell die Frage als ersten Satz wiederholt, weg damit.
+        first_sentence = re.match(r"^(.{1,180}?[.!?])\s+(.*)$", text)
+        if first_sentence:
+            first = re.sub(r"[^\wäöüÄÖÜß]+", " ", first_sentence.group(1)).strip().lower()
+            trig = re.sub(r"[^\wäöüÄÖÜß]+", " ", trigger).strip().lower()
+            if trig and (first.startswith(trig) or trig.startswith(first.rstrip(" ?!"))):
+                text = first_sentence.group(2).strip()
+
+        # Typische Meta-Sätze kleiner Modelle entfernen.
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        cleaned: list[str] = []
+        meta_patterns = (
+            r"\bfragesteller\b",
+            rf"\b{re.escape(author.lower())}\b.*\b(bereit|interessiert|freut|möchte wissen|will wissen)\b",
+            r"\blasst uns sehen\b",
+            r"\bdas ist eine lustige anfrage\b",
+            r"\bich antworte\b",
+        )
+        for sentence in sentences:
+            lowered_sentence = sentence.lower()
+            if any(re.search(pattern, lowered_sentence) for pattern in meta_patterns):
+                continue
+            cleaned.append(sentence)
+        text = " ".join(cleaned).strip()
+        if not re.search(r"[A-Za-zÄÖÜäöüß0-9]", text) or len(text) < 8:
+            return self._fallback_reply(trigger) or reply.strip()
+
+        return text
 
     def _format_recent_history(self, *, include_for_context: bool) -> str:
         previous = list(self.chat_history)[:-1]
@@ -536,6 +603,18 @@ class PandaBot(commands.Bot):
             return "(noch keine vorherigen Chatnachrichten)"
         limit = settings.history_length if include_for_context else min(4, settings.history_length)
         return "\n".join(previous[-limit:])
+
+    def _has_memory_signal(self, text: str) -> bool:
+        lowered = text.lower()
+        patterns = (
+            r"\bmerk(?:\s+dir)?\b",
+            r"\berinner\b",
+            r"\bich\s+(mag|liebe|hasse|bevorzuge|will|möchte|moechte|bin|heiße|heisse)\b",
+            r"\bmein(?:e|er|en|em)?\s+\w+\s+ist\b",
+            r"\bnenn\s+mich\b",
+            r"\bbitte\s+(immer|nie|nicht)\b",
+        )
+        return any(re.search(pattern, lowered) for pattern in patterns)
 
     async def _remember_user_later(
         self,
@@ -547,13 +626,15 @@ class PandaBot(commands.Bot):
     ) -> None:
         if not settings.user_memory_enabled:
             return
+        if not self._has_memory_signal(user_message):
+            return
 
         existing = self.user_memory.load(user_id, author)
         memory_system = (
             "Du pflegst ein kompaktes, lokales Gedächtnis für einen Twitch-Chatbot. "
             "Extrahiere NUR dauerhafte, hilfreiche Fakten oder Präferenzen über den User: "
             "Name/Anrede, Sprache, Interessen, Humor, technische Vorlieben, wiederkehrende Wünsche. "
-            "Speichere KEINE einmaligen Fragen, keine temporären Themen, keine sensiblen Daten und keine Geheimnisse. "
+            "Speichere KEINE einmaligen Fragen, keine Bot-Test-Zwischenstände, keine Chat-Stimmung, keine temporären Themen, keine sensiblen Daten und keine Geheimnisse. "
             "Wenn nichts Neues dauerhaft Nützliches dabei ist, antworte exakt: KEINE. "
             "Sonst antworte mit 1-3 kurzen Markdown-Bullets."
         )
@@ -618,19 +699,24 @@ class PandaBot(commands.Bot):
                         "fasse den Chat nicht ungefragt zusammen."
                     )
                 user_prompt = (
-                    f"Fragesteller: {author}\n"
-                    f"User-Notizen zu {author}:\n{memory[-1800:]}\n\n"
-                    f"Optionale vorherige Chatnachrichten (älteste zuerst):\n{history}\n\n"
-                    f"Aktuelle Anfrage, die du beantworten musst: {trigger}\n\n"
+                    f"Du antwortest direkt an: {author}\n"
+                    f"Interne Stilhinweise zu dieser Person (nicht erwähnen, nicht paraphrasieren):\n{memory[-1200:]}\n\n"
+                    f"Optionale vorherige Chatnachrichten (nur Kontext, nicht nacherzählen):\n{history}\n\n"
+                    f"Aktuelle Anfrage, die du jetzt beantworten musst: {trigger}\n\n"
                     f"Aufgabe: {task}\n"
-                    "Schreibe jetzt nur die finale Antwort an den Fragesteller."
+                    "Schreibe jetzt nur die natürliche Antwort an diese Person. Keine dritte Person, kein Markdown, keine Frage-Wiederholung."
                 )
 
                 reply = await self.llm.complete(system_prompt, user_prompt)
 
         if not reply:
-            LOGGER.warning("LLM hat keine brauchbare Antwort geliefert")
-            return
+            fallback = self._fallback_reply(trigger)
+            if not fallback:
+                LOGGER.warning("LLM hat keine brauchbare Antwort geliefert")
+                return
+            reply = fallback
+
+        reply = self._polish_reply(reply, trigger=trigger, author=author)
 
         try:
             # respond() sendet die Nachricht in den Kanal der Ursprungsnachricht.
@@ -706,15 +792,15 @@ class PandaBot(commands.Bot):
                 else:
                     task = "Beantworte die aktuelle Anfrage direkt und fasse den Chat nicht ungefragt zusammen."
                 user_prompt = (
-                    f"Fragesteller: {author}\n"
-                    f"User-Notizen zu {author}:\n{memory[-1800:]}\n\n"
-                    f"Optionale vorherige Chatnachrichten (älteste zuerst):\n{history}\n\n"
-                    f"Aktuelle Anfrage, die du beantworten musst: {frage}\n\n"
+                    f"Du antwortest direkt an: {author}\n"
+                    f"Interne Stilhinweise zu dieser Person (nicht erwähnen, nicht paraphrasieren):\n{memory[-1200:]}\n\n"
+                    f"Optionale vorherige Chatnachrichten (nur Kontext, nicht nacherzählen):\n{history}\n\n"
+                    f"Aktuelle Anfrage, die du jetzt beantworten musst: {frage}\n\n"
                     f"Aufgabe: {task}\n"
-                    "Schreibe jetzt nur die finale Antwort an den Fragesteller."
+                    "Schreibe jetzt nur die natürliche Antwort an diese Person. Keine dritte Person, kein Markdown, keine Frage-Wiederholung."
                 )
                 reply = await self.llm.complete(system_prompt, user_prompt)
-        answer = reply or "Mein KI-Hirn macht gerade Pause 🐼"
+        answer = self._polish_reply(reply, trigger=frage, author=author) if reply else "Mein KI-Hirn macht gerade Pause 🐼"
         await ctx.reply(answer)
         LOGGER.info("Command-Antwort gesendet: %s", answer)
         asyncio.create_task(
