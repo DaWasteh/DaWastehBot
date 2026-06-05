@@ -31,6 +31,285 @@ LOGGER: logging.Logger = logging.getLogger("pandabot")
 BOT_SCOPES = "user:read:chat user:write:chat user:bot"
 OWNER_SCOPES = "channel:bot"
 
+LANGUAGE_DEFAULT = "Deutsch/Bayrisch"
+LANGUAGE_ENGLISH = "English"
+LANGUAGE_SWEDISH = "Svenska"
+LANGUAGE_ICELANDIC = "Íslenska"
+LANGUAGE_POLISH = "Polski"
+LANGUAGE_OTHER = "Sprache der aktuellen Anfrage"
+SUPPORTED_LANGUAGES = (
+    LANGUAGE_DEFAULT,
+    LANGUAGE_ENGLISH,
+    LANGUAGE_SWEDISH,
+    LANGUAGE_ICELANDIC,
+    LANGUAGE_POLISH,
+)
+
+LANGUAGE_WORDS: dict[str, set[str]] = {
+    LANGUAGE_DEFAULT: {
+        "servus",
+        "griaß",
+        "gruess",
+        "hallo",
+        "moin",
+        "was",
+        "wie",
+        "warum",
+        "wann",
+        "wo",
+        "wer",
+        "wieso",
+        "bitte",
+        "danke",
+        "nicht",
+        "nichts",
+        "ich",
+        "du",
+        "mir",
+        "mein",
+        "meine",
+        "dein",
+        "geht",
+        "gehts",
+        "erzähl",
+        "erzaehl",
+        "mach",
+        "kannst",
+        "bist",
+        "ist",
+        "stream",
+        "oida",
+        "fei",
+        "ned",
+    },
+    LANGUAGE_ENGLISH: {
+        "hi",
+        "hello",
+        "hey",
+        "what",
+        "how",
+        "why",
+        "when",
+        "where",
+        "who",
+        "please",
+        "thanks",
+        "thank",
+        "tell",
+        "explain",
+        "can",
+        "could",
+        "would",
+        "should",
+        "you",
+        "your",
+        "the",
+        "and",
+        "is",
+        "are",
+        "am",
+        "not",
+        "stream",
+        "joke",
+        "story",
+    },
+    LANGUAGE_SWEDISH: {
+        "hej",
+        "hallå",
+        "halla",
+        "vad",
+        "hur",
+        "varför",
+        "varfor",
+        "när",
+        "nar",
+        "var",
+        "vem",
+        "snälla",
+        "snalla",
+        "tack",
+        "berätta",
+        "beratta",
+        "förklara",
+        "forklara",
+        "jag",
+        "du",
+        "din",
+        "är",
+        "ar",
+        "inte",
+        "och",
+        "på",
+        "pa",
+        "det",
+        "här",
+        "har",
+    },
+    LANGUAGE_POLISH: {
+        "cześć",
+        "czesc",
+        "siema",
+        "hej",
+        "witam",
+        "co",
+        "jak",
+        "dlaczego",
+        "kiedy",
+        "gdzie",
+        "kto",
+        "proszę",
+        "prosze",
+        "dzięki",
+        "dzieki",
+        "dziękuję",
+        "dziekuje",
+        "powiedz",
+        "opowiedz",
+        "wyjaśnij",
+        "wyjasnij",
+        "ja",
+        "ty",
+        "twój",
+        "twoj",
+        "jest",
+        "nie",
+        "i",
+        "że",
+        "ze",
+        "się",
+        "sie",
+        "stream",
+        "żart",
+        "zart",
+        "historię",
+        "historie",
+    },
+    LANGUAGE_ICELANDIC: {
+        "hæ",
+        "hae",
+        "halló",
+        "hallo",
+        "hvað",
+        "hvad",
+        "hvernig",
+        "afhverju",
+        "hvenær",
+        "hvenaer",
+        "hvar",
+        "hver",
+        "vinsamlegast",
+        "takk",
+        "segðu",
+        "segdu",
+        "útskýrðu",
+        "utskyrdu",
+        "ég",
+        "eg",
+        "þú",
+        "thu",
+        "þitt",
+        "er",
+        "ekki",
+        "og",
+        "á",
+        "a",
+        "þetta",
+        "thetta",
+    },
+}
+
+
+def _message_words(text: str) -> list[str]:
+    return re.findall(r"[A-Za-zÀ-ž]+", text.lower())
+
+
+def detect_message_language(text: str) -> str:
+    """Erkennt die wahrscheinlichste Sprache der aktuellen Chat-Nachricht.
+
+    Absichtlich leichtgewichtig und deterministisch: Die Antwortsprache soll von
+    der aktuellen Frage kommen, nicht von einer gespeicherten User-Notiz. Wenn
+    die Nachricht zu kurz oder uneindeutig ist, bleibt der Stream-Default
+    Deutsch/Bayrisch.
+    """
+    lowered = text.lower()
+    lowered = re.sub(r"!panda\b", " ", lowered)
+    lowered = re.sub(r"@?\b(?:pandabot|dawastehbot)\b", " ", lowered)
+    words = _message_words(lowered)
+    if not words:
+        return LANGUAGE_DEFAULT
+
+    scores = dict.fromkeys(SUPPORTED_LANGUAGES, 0)
+    for language, markers in LANGUAGE_WORDS.items():
+        scores[language] += sum(1 for word in words if word in markers)
+
+    if re.search(r"[ąćęłńóśźż]", lowered):
+        scores[LANGUAGE_POLISH] += 5
+    if re.search(r"\b(czy|jest|nie|się|sie|proszę|prosze|dzięki|dzieki)\b", lowered):
+        scores[LANGUAGE_POLISH] += 2
+    if re.search(r"[ðþ]", lowered):
+        scores[LANGUAGE_ICELANDIC] += 6
+    if "æ" in lowered:
+        scores[LANGUAGE_ICELANDIC] += 2
+    if "å" in lowered:
+        scores[LANGUAGE_SWEDISH] += 4
+    if re.search(r"[äö]", lowered):
+        scores[LANGUAGE_DEFAULT] += 1
+        scores[LANGUAGE_SWEDISH] += 1
+    if re.search(r"[ß]", lowered):
+        scores[LANGUAGE_DEFAULT] += 4
+
+    best_language, best_score = max(scores.items(), key=lambda item: item[1])
+    if best_score <= 0:
+        return LANGUAGE_DEFAULT
+
+    # Bei Gleichstand oder sehr schwachem Signal nicht hektisch vom deutschen
+    # Stream-Default wegkippen. Englisch/Schwedisch/Isländisch brauchen aber nur
+    # ein knappes eindeutiges Signal, damit kurze Fragen funktionieren.
+    tied = [language for language, score in scores.items() if score == best_score]
+    if len(tied) > 1:
+        if LANGUAGE_DEFAULT in tied:
+            return LANGUAGE_DEFAULT
+        return best_language
+    return best_language
+
+
+def language_reply_instruction(current_language: str, dominant_language: str | None = None) -> str:
+    """Prompt-Baustein, der aktuelle Antwortsprache von Memory-Sprache trennt."""
+    dominant = dominant_language or LANGUAGE_DEFAULT
+    memory_hint = (
+        f"Die gespeicherte/häufigste Sprache dieser Person ist: {dominant}. "
+        "Das ist nur Memory-Kontext und darf die aktuelle Antwortsprache NICHT überschreiben."
+    )
+    if current_language == LANGUAGE_ENGLISH:
+        return (
+            "Aktuelle Antwortsprache: English. Reply to this message in natural English only; "
+            "do not answer in German unless the user switches back to German. "
+            f"{memory_hint}"
+        )
+    if current_language == LANGUAGE_SWEDISH:
+        return (
+            "Aktuelle Antwortsprache: Svenska. Svara på den här personen på naturlig svenska; "
+            "byt inte till tyska eller engelska om det inte efterfrågas. "
+            f"{memory_hint}"
+        )
+    if current_language == LANGUAGE_ICELANDIC:
+        return (
+            "Aktuelle Antwortsprache: Íslenska. Svaraðu þessari manneskju á eðlilegri íslensku; "
+            "ekki skipta yfir í þýsku eða ensku nema beðið sé um það. "
+            f"{memory_hint}"
+        )
+    if current_language == LANGUAGE_POLISH:
+        return (
+            "Aktuelle Antwortsprache: Polski. Odpowiedz tej osobie naturalnie po polsku; "
+            "nie przechodź na niemiecki ani angielski, chyba że ktoś o to poprosi. "
+            f"{memory_hint}"
+        )
+    return (
+        "Aktuelle Antwortsprache: Deutsch/Bayrisch. Antworte locker auf Deutsch, gern leicht bayrisch; "
+        "wechsle nicht ins Englische, außer die aktuelle Nachricht ist Englisch. "
+        f"{memory_hint}"
+    )
+
 
 # --------------------------------------------------------------------------- #
 #  LLM-Client (llama-server, OpenAI-kompatibel)
@@ -84,7 +363,8 @@ class LLMClient:
                         f"{user_prompt}\n\n"
                         "WICHTIG: Gib NUR die finale Twitch-Chat-Antwort aus. "
                         "Sprich den Fragesteller direkt mit du an, nie in der dritten Person. "
-                        "Keine Analyse, keine Gedanken, kein Englisch, kein Markdown/Fettdruck, kein Wiederholen der Frage, kein 'We need'."
+                        "Keine Analyse, keine Gedanken, kein Markdown/Fettdruck, kein Wiederholen der Frage, kein 'We need'. "
+                        "Verwende exakt die im Prompt geforderte Antwortsprache; kein ungefragter Sprachwechsel."
                     ),
                 },
                 # MiniCPM5/Thinking-Templates starten sonst gern mit CoT. Diese
@@ -207,6 +487,14 @@ class UserMemoryStore:
         safe_id = re.sub(r"[^0-9A-Za-z_-]", "_", str(user_id))
         return self.root / f"{safe_id}.md"
 
+    def _initial_content(self, user_id: str, display_name: str) -> str:
+        return (
+            f"# User-Gedächtnis: {display_name}\n\n"
+            f"- Twitch-User-ID: {user_id}\n"
+            f"- Anzeigename zuletzt gesehen: {display_name}\n\n"
+            "## Notizen\n"
+        )
+
     def load(self, user_id: str, display_name: str) -> str:
         path = self._path(user_id)
         if not path.exists():
@@ -216,6 +504,73 @@ class UserMemoryStore:
         except OSError:
             LOGGER.exception("Konnte User-Gedächtnis nicht lesen: %s", path)
             return "(Gedächtnis gerade nicht lesbar)"
+
+    def language_counts(self, memory_text: str) -> dict[str, int]:
+        match = re.search(r"(?m)^- Zählung: (?P<counts>.+)$", memory_text)
+        if not match:
+            return {}
+        counts: dict[str, int] = {}
+        for part in match.group("counts").split(","):
+            if "=" not in part:
+                continue
+            language, value = part.rsplit("=", 1)
+            try:
+                count = int(value.strip())
+            except ValueError:
+                continue
+            if count > 0:
+                counts[language.strip()] = count
+        return counts
+
+    def dominant_language(self, memory_text: str) -> str | None:
+        counts = self.language_counts(memory_text)
+        if not counts:
+            return None
+        return max(counts.items(), key=lambda item: item[1])[0]
+
+    def update_language_profile(self, user_id: str, display_name: str, language: str) -> None:
+        if language not in SUPPORTED_LANGUAGES:
+            return
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self._path(user_id)
+        try:
+            current = path.read_text(encoding="utf-8") if path.exists() else self._initial_content(user_id, display_name)
+        except OSError:
+            LOGGER.exception("Konnte User-Gedächtnis nicht für Sprachprofil lesen: %s", path)
+            return
+
+        counts = self.language_counts(current)
+        counts[language] = counts.get(language, 0) + 1
+        dominant = max(counts.items(), key=lambda item: item[1])[0]
+        ordered_counts = ", ".join(
+            f"{name}={counts[name]}" for name in SUPPORTED_LANGUAGES if counts.get(name, 0) > 0
+        )
+        profile = (
+            "## Sprachprofil (automatisch)\n"
+            f"- Häufigste Sprache: {dominant}\n"
+            f"- Zählung: {ordered_counts}\n"
+            "- Hinweis: Antworten richten sich nach der Sprache der aktuellen Nachricht; diese Statistik ist nur Memory-Kontext.\n"
+        )
+
+        if re.search(r"(?ms)^## Sprachprofil \(automatisch\)\n.*?(?=\n## |\Z)", current):
+            current = re.sub(
+                r"(?ms)^## Sprachprofil \(automatisch\)\n.*?(?=\n## |\Z)",
+                profile.rstrip(),
+                current,
+                count=1,
+            )
+        elif "\n## Notizen\n" in current:
+            current = current.replace("\n## Notizen\n", f"\n{profile}\n## Notizen\n", 1)
+        else:
+            if not current.endswith("\n"):
+                current += "\n"
+            current += f"\n{profile}"
+
+        try:
+            path.write_text(current, encoding="utf-8")
+        except OSError:
+            LOGGER.exception("Konnte User-Sprachprofil nicht speichern: %s", path)
 
     def append(self, user_id: str, display_name: str, notes: str) -> None:
         cleaned = self._clean_notes(notes)
@@ -227,12 +582,7 @@ class UserMemoryStore:
         if path.exists():
             current = path.read_text(encoding="utf-8")
         else:
-            current = (
-                f"# User-Gedächtnis: {display_name}\n\n"
-                f"- Twitch-User-ID: {user_id}\n"
-                f"- Anzeigename zuletzt gesehen: {display_name}\n\n"
-                "## Notizen\n"
-            )
+            current = self._initial_content(user_id, display_name)
 
         current_lower = current.lower()
         new_lines = [line for line in cleaned.splitlines() if line.lower() not in current_lower]
@@ -322,19 +672,20 @@ def build_system_prompt(ctx: StreamContext) -> str:
         f"Du bist {settings.bot_name}, ein freundlicher, witziger Chatbot im "
         f"Twitch-Stream von {settings.channel_name}. "
         f"Aktueller Stream-Kontext: Spiel/Kategorie='{ctx.game}', Titel='{ctx.title}'. "
-        "Stil: natürlich, direkt und conversational wie ein guter GPT-4o-Chat, aber als Twitch-Chatbot. "
-        "Antworte IMMER auf Deutsch. Meist 1-2 kurze Sätze; bei Geschichten oder Witzen darf es etwas länger sein. "
-        "Beantworte genau die aktuelle Bitte: Wenn jemand einen Witz oder eine Geschichte will, erzähl sie; wenn jemand eine Erklärung will, erklär kurz. "
-        "Bei frechen oder bösen Witzen darfst du trockenen, leicht schwarzen Humor nutzen, aber keine Hassrede und keine stumpfen Beleidigungen gegen echte Personen. "
-        "Wenn nach Google/Websuche/Live-Recherche gefragt wird, sag ehrlich kurz, dass du hier keinen Browserzugriff hast, und biete stattdessen eine kurze Einordnung aus vorhandenem Wissen an. "
+        "Stil: natürlich, direkt und conversational. "
+        "Antworte IMMER in der Sprache der aktuellen Nachricht. Der User-Prompt nennt dafür eine aktuelle Antwortsprache; diese hat Vorrang vor Chatverlauf und User-Memory. "
+        "Meist 1-3 kurze Sätze; bei Geschichten, Witzen oder Definitionen darf es etwas länger sein. "
+        "Antworte NIE in Deutsch, wenn die aktuelle Frage auf Englisch/Schwedisch/Isländisch/Polnisch gestellt wurde, und umgekehrt. "
+        "Beantworte genau die aktuelle Bitte: Wenn jemand einen Witz oder eine Geschichte will, erzähl sie; wenn jemand eine Erklärung will, erklär es. "
+        "Bei frechen oder bösen Witzen darfst du trockenen, leicht schwarzen Humor nutzen. "
         "Wenn nach dem heutigen Stream oder Thema gefragt wird, nutze den Stream-Kontext. "
         "Der Chatverlauf ist nur Zusatzkontext: fasse ihn nur zusammen, wenn ausdrücklich nach Chat, Stimmung, Verlauf oder Zusammenfassung gefragt wird. "
         "Persönliche Notizen zum Fragesteller sind nur leise Hinweise, keine Pflichtliste und kein Gesprächsthema. "
         "Sprich den Fragesteller direkt mit 'du' an; rede nicht in der dritten Person über ihn. "
         "Kein steifer Assistententon, keine Meta-Sätze wie 'ich antworte jetzt', keine Analyse, kein Wiederholen der Frage, kein Markdown/Fettdruck. "
         "Nutze Spiel und Titel nur als Kontext, aber kopiere keine Deko, Commands, Emotes oder Insider wie XD/420 aus dem Titel. "
-        "Emojis sparsam verwenden, höchstens eins, und nur wenn es wirklich passt. "
-        "Sei locker und unterhaltsam, aber nie beleidigend. Schreibe nur deine finale Antwort."
+        "Emojis sparsam verwenden. "
+        "Sei locker und unterhaltsam, aber nie beleidigend. Schreibe nur deine finale Antwort. "
     )
 
 
@@ -537,7 +888,7 @@ class PandaBot(commands.Bot):
         )
         return any(re.search(pattern, lowered) for pattern in patterns)
 
-    def _stream_context_answer(self) -> str:
+    def _stream_context_answer(self, language: str = LANGUAGE_DEFAULT) -> str:
         title_parts: list[str] = []
         for raw in self.context.title.split("|"):
             part = raw.strip()
@@ -551,28 +902,63 @@ class PandaBot(commands.Bot):
 
         if title_parts:
             detail = ", ".join(title_parts[:2])
+            if language == LANGUAGE_ENGLISH:
+                return f"Roughly, today’s stream is about {self.context.game}, apparently with a focus on {detail}."
+            if language == LANGUAGE_SWEDISH:
+                return f"I stora drag handlar streamen om {self.context.game}, tydligen med fokus på {detail}."
+            if language == LANGUAGE_ICELANDIC:
+                return f"Í grófum dráttum fjallar streymið um {self.context.game}, greinilega með áherslu á {detail}."
+            if language == LANGUAGE_POLISH:
+                return f"Ogólnie stream jest o {self.context.game}, najwyraźniej z fokusem na {detail}."
             return f"Grob geht’s um {self.context.game}; heute offenbar mit Fokus auf {detail}."
+        if language == LANGUAGE_ENGLISH:
+            return f"Roughly, today’s stream is about {self.context.game}; the exact focus is unfolding live."
+        if language == LANGUAGE_SWEDISH:
+            return f"I stora drag handlar streamen idag om {self.context.game}; exakt fokus märks nog under streamen."
+        if language == LANGUAGE_ICELANDIC:
+            return f"Í grófum dráttum fjallar streymið í dag um {self.context.game}; nákvæmi fókusinn kemur í ljós í beinni."
+        if language == LANGUAGE_POLISH:
+            return f"Ogólnie dzisiejszy stream jest o {self.context.game}; dokładny fokus wyjdzie w trakcie live’a."
         return f"Grob geht’s heute um {self.context.game}; der genaue Fokus ergibt sich gerade im Stream."
 
-    def _fallback_reply(self, trigger: str) -> str | None:
+    def _fallback_reply(self, trigger: str, language: str = LANGUAGE_DEFAULT) -> str | None:
         lowered = trigger.lower()
-        if "was geht" in lowered:
+        if "was geht" in lowered or "what's up" in lowered or "whats up" in lowered:
+            if language == LANGUAGE_ENGLISH:
+                return "All good, I’m hanging out in chat waiting for chaos. What’s up with you?"
             return "Alles entspannt, ich häng im Chat rum und warte auf Chaos. Was geht bei dir?"
-        if "was stimmt nicht" in lowered:
+        if "was stimmt nicht" in lowered or "what is wrong" in lowered or "what's wrong" in lowered:
+            if language == LANGUAGE_ENGLISH:
+                return "Probably too much model caffeine and not enough polish. But hey, we’re debugging me live."
             return "Vermutlich zu viel Modell-Koffein und zu wenig Feinschliff. Aber hey, wir debuggen mich ja gerade live."
-        if "google" in lowered or "websuche" in lowered or "suche" in lowered:
+        if "google" in lowered or "websuche" in lowered or "suche" in lowered or "search" in lowered:
+            if language == LANGUAGE_ENGLISH:
+                return "I can’t live-google from here, but I can still give you a quick take from what I know."
+            if language == LANGUAGE_SWEDISH:
+                return "Jag kan inte googla live härifrån, men jag kan ge dig en snabb bedömning utifrån det jag vet."
+            if language == LANGUAGE_ICELANDIC:
+                return "Ég get ekki gúglað í beinni héðan, en ég get samt gefið þér stutta útskýringu út frá því sem ég veit."
+            if language == LANGUAGE_POLISH:
+                return "Nie mogę tutaj googlować na żywo, ale mogę krótko wyjaśnić temat z tego, co wiem."
             return "Live googeln kann ich hier nicht direkt, aber ich kann dir aus meinem Wissen kurz einordnen, worum es geht."
         return None
 
-    def _polish_reply(self, reply: str, *, trigger: str, author: str) -> str:
+    def _polish_reply(
+        self,
+        reply: str,
+        *,
+        trigger: str,
+        author: str,
+        language: str = LANGUAGE_DEFAULT,
+    ) -> str:
         text = reply.strip()
         text = re.sub(r"\*\*(.*?)\*\*", r"\1", text).strip()
 
         # Wenn das Modell die Frage als ersten Satz wiederholt, weg damit.
         first_sentence = re.match(r"^(.{1,180}?[.!?])\s+(.*)$", text)
         if first_sentence:
-            first = re.sub(r"[^\wäöüÄÖÜß]+", " ", first_sentence.group(1)).strip().lower()
-            trig = re.sub(r"[^\wäöüÄÖÜß]+", " ", trigger).strip().lower()
+            first = re.sub(r"[^\w]+", " ", first_sentence.group(1)).strip().lower()
+            trig = re.sub(r"[^\w]+", " ", trigger).strip().lower()
             if trig and (first.startswith(trig) or trig.startswith(first.rstrip(" ?!"))):
                 text = first_sentence.group(2).strip()
 
@@ -592,8 +978,8 @@ class PandaBot(commands.Bot):
                 continue
             cleaned.append(sentence)
         text = " ".join(cleaned).strip()
-        if not re.search(r"[A-Za-zÄÖÜäöüß0-9]", text) or len(text) < 8:
-            return self._fallback_reply(trigger) or reply.strip()
+        if not re.search(r"[\w]", text) or len(text) < 8:
+            return self._fallback_reply(trigger, language) or reply.strip()
 
         return text
 
@@ -609,10 +995,19 @@ class PandaBot(commands.Bot):
         patterns = (
             r"\bmerk(?:\s+dir)?\b",
             r"\berinner\b",
+            r"\bremember\b",
+            r"\bpamiętaj\b",
+            r"\bkom\s+ihåg\b",
+            r"\bmundu\b",
             r"\bich\s+(mag|liebe|hasse|bevorzuge|will|möchte|moechte|bin|heiße|heisse)\b",
+            r"\bi\s+(like|love|hate|prefer|want|am)\b",
+            r"\bja\s+(lubię|lubie|kocham|nienawidzę|nienawidze|wolę|wole|jestem)\b",
             r"\bmein(?:e|er|en|em)?\s+\w+\s+ist\b",
+            r"\bmy\s+\w+\s+is\b",
             r"\bnenn\s+mich\b",
+            r"\bcall\s+me\b",
             r"\bbitte\s+(immer|nie|nicht)\b",
+            r"\bplease\s+(always|never|do not|don't)\b",
         )
         return any(re.search(pattern, lowered) for pattern in patterns)
 
@@ -633,7 +1028,8 @@ class PandaBot(commands.Bot):
         memory_system = (
             "Du pflegst ein kompaktes, lokales Gedächtnis für einen Twitch-Chatbot. "
             "Extrahiere NUR dauerhafte, hilfreiche Fakten oder Präferenzen über den User: "
-            "Name/Anrede, Sprache, Interessen, Humor, technische Vorlieben, wiederkehrende Wünsche. "
+            "Name/Anrede, Interessen, Humor, technische Vorlieben, wiederkehrende Wünsche. "
+            "Speichere Sprache nur, wenn der User ausdrücklich eine dauerhafte Sprachpräferenz nennt; einmalige Sprachwechsel werden automatisch gezählt und gehören NICHT in diese Notizen. "
             "Speichere KEINE einmaligen Fragen, keine Bot-Test-Zwischenstände, keine Chat-Stimmung, keine temporären Themen, keine sensiblen Daten und keine Geheimnisse. "
             "Wenn nichts Neues dauerhaft Nützliches dabei ist, antworte exakt: KEINE. "
             "Sonst antworte mit 1-3 kurzen Markdown-Bullets."
@@ -677,17 +1073,24 @@ class PandaBot(commands.Bot):
             LOGGER.debug("LLM beschäftigt, Trigger von %s verworfen", author)
             return
 
+        current_language = detect_message_language(trigger)
+
         async with self._llm_lock:
             if self._broadcaster:
                 await self.context.refresh(self, self._broadcaster)
 
+            memory = self.user_memory.load(payload.chatter.id, author)
+            dominant_language = self.user_memory.dominant_language(memory)
+            if settings.user_memory_enabled:
+                self.user_memory.update_language_profile(payload.chatter.id, author, current_language)
+            language_instruction = language_reply_instruction(current_language, dominant_language)
+
             if self._is_stream_context_question(trigger):
-                reply = self._stream_context_answer()
+                reply = self._stream_context_answer(current_language)
             else:
                 system_prompt = build_system_prompt(self.context)
                 wants_chat_context = self._is_chat_context_question(trigger)
                 history = self._format_recent_history(include_for_context=wants_chat_context)
-                memory = self.user_memory.load(payload.chatter.id, author)
                 if wants_chat_context:
                     task = (
                         "Die Anfrage fragt nach Chat/Stimmung/Verlauf: fasse die vorherigen Chatnachrichten konkret zusammen. "
@@ -700,6 +1103,7 @@ class PandaBot(commands.Bot):
                     )
                 user_prompt = (
                     f"Du antwortest direkt an: {author}\n"
+                    f"{language_instruction}\n"
                     f"Interne Stilhinweise zu dieser Person (nicht erwähnen, nicht paraphrasieren):\n{memory[-1200:]}\n\n"
                     f"Optionale vorherige Chatnachrichten (nur Kontext, nicht nacherzählen):\n{history}\n\n"
                     f"Aktuelle Anfrage, die du jetzt beantworten musst: {trigger}\n\n"
@@ -710,13 +1114,13 @@ class PandaBot(commands.Bot):
                 reply = await self.llm.complete(system_prompt, user_prompt)
 
         if not reply:
-            fallback = self._fallback_reply(trigger)
+            fallback = self._fallback_reply(trigger, current_language)
             if not fallback:
                 LOGGER.warning("LLM hat keine brauchbare Antwort geliefert")
                 return
             reply = fallback
 
-        reply = self._polish_reply(reply, trigger=trigger, author=author)
+        reply = self._polish_reply(reply, trigger=trigger, author=author, language=current_language)
 
         try:
             # respond() sendet die Nachricht in den Kanal der Ursprungsnachricht.
@@ -777,22 +1181,29 @@ class PandaBot(commands.Bot):
             await ctx.reply("Frag mich was! Beispiel: !panda wie läuft's?")
             return
         author = ctx.chatter.display_name or ctx.chatter.name or str(ctx.chatter.id)
+        current_language = detect_message_language(frage)
         if self._broadcaster:
             await self.context.refresh(self, self._broadcaster)
         async with self._llm_lock:
+            memory = self.user_memory.load(ctx.chatter.id, author)
+            dominant_language = self.user_memory.dominant_language(memory)
+            if settings.user_memory_enabled:
+                self.user_memory.update_language_profile(ctx.chatter.id, author, current_language)
+            language_instruction = language_reply_instruction(current_language, dominant_language)
+
             if self._is_stream_context_question(frage):
-                reply = self._stream_context_answer()
+                reply = self._stream_context_answer(current_language)
             else:
                 system_prompt = build_system_prompt(self.context)
                 wants_chat_context = self._is_chat_context_question(frage)
                 history = self._format_recent_history(include_for_context=wants_chat_context)
-                memory = self.user_memory.load(ctx.chatter.id, author)
                 if wants_chat_context:
                     task = "Fasse die letzten Chatnachrichten konkret zusammen; wenn wenig los war, sag das ehrlich."
                 else:
                     task = "Beantworte die aktuelle Anfrage direkt und fasse den Chat nicht ungefragt zusammen."
                 user_prompt = (
                     f"Du antwortest direkt an: {author}\n"
+                    f"{language_instruction}\n"
                     f"Interne Stilhinweise zu dieser Person (nicht erwähnen, nicht paraphrasieren):\n{memory[-1200:]}\n\n"
                     f"Optionale vorherige Chatnachrichten (nur Kontext, nicht nacherzählen):\n{history}\n\n"
                     f"Aktuelle Anfrage, die du jetzt beantworten musst: {frage}\n\n"
@@ -800,7 +1211,11 @@ class PandaBot(commands.Bot):
                     "Schreibe jetzt nur die natürliche Antwort an diese Person. Keine dritte Person, kein Markdown, keine Frage-Wiederholung."
                 )
                 reply = await self.llm.complete(system_prompt, user_prompt)
-        answer = self._polish_reply(reply, trigger=frage, author=author) if reply else "Mein KI-Hirn macht gerade Pause 🐼"
+        answer = (
+            self._polish_reply(reply, trigger=frage, author=author, language=current_language)
+            if reply
+            else self._fallback_reply(frage, current_language) or "Mein KI-Hirn macht gerade Pause 🐼"
+        )
         await ctx.reply(answer)
         LOGGER.info("Command-Antwort gesendet: %s", answer)
         asyncio.create_task(

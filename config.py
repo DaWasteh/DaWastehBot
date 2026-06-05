@@ -47,9 +47,9 @@ class Settings:
     )
     llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "local-model"))
     llm_temperature: float = field(
-        default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7"))
+        default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.8"))
     )
-    llm_top_p: float = field(default_factory=lambda: float(os.getenv("LLM_TOP_P", "0.9")))
+    llm_top_p: float = field(default_factory=lambda: float(os.getenv("LLM_TOP_P", "0.95")))
     llm_repeat_penalty: float = field(
         default_factory=lambda: float(os.getenv("LLM_REPEAT_PENALTY", "1.15"))
     )
@@ -66,7 +66,7 @@ class Settings:
 
     # --- Verhalten ---
     history_length: int = field(default_factory=lambda: int(os.getenv("HISTORY_LENGTH", "12")))
-    idle_threshold: int = field(default_factory=lambda: int(os.getenv("IDLE_THRESHOLD", "300")))
+    idle_threshold: int = field(default_factory=lambda: int(os.getenv("IDLE_THRESHOLD", "420")))
     context_ttl: int = field(default_factory=lambda: int(os.getenv("CONTEXT_TTL", "120")))
     max_message_length: int = 480  # Twitch-Limit ist 500; etwas Puffer.
     user_memory_dir: str = field(default_factory=lambda: os.getenv("USER_MEMORY_DIR", "user_memories"))

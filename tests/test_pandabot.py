@@ -9,7 +9,18 @@ from __future__ import annotations
 
 import pytest
 
-from pandabot import LLMClient, PandaBot
+from pandabot import (
+    LANGUAGE_DEFAULT,
+    LANGUAGE_ENGLISH,
+    LANGUAGE_ICELANDIC,
+    LANGUAGE_POLISH,
+    LANGUAGE_SWEDISH,
+    LLMClient,
+    PandaBot,
+    UserMemoryStore,
+    detect_message_language,
+    language_reply_instruction,
+)
 
 
 @pytest.fixture
@@ -84,3 +95,38 @@ def test_is_mention_without_login_falls_back_to_botname(bot: PandaBot) -> None:
     bot._bot_login = None
     assert bot._is_mention("PandaBot hallo") is True
     assert bot._is_mention("@dawastehbot hallo") is False
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("PandaBot servus, wie gehts?", LANGUAGE_DEFAULT),
+        ("@PandaBot what are we doing today?", LANGUAGE_ENGLISH),
+        ("!panda hej, vad händer idag?", LANGUAGE_SWEDISH),
+        ("PandaBot hvað er í gangi?", LANGUAGE_ICELANDIC),
+        ("PandaBot siema, co dzisiaj robimy?", LANGUAGE_POLISH),
+        ("PandaBot cześć, wyjaśnij proszę ten stream", LANGUAGE_POLISH),
+    ],
+)
+def test_detect_message_language(message: str, expected: str) -> None:
+    assert detect_message_language(message) == expected
+
+
+def test_language_instruction_current_message_overrides_memory_language() -> None:
+    instruction = language_reply_instruction(LANGUAGE_ENGLISH, LANGUAGE_DEFAULT)
+
+    assert "Reply to this message in natural English only" in instruction
+    assert "darf die aktuelle Antwortsprache NICHT überschreiben" in instruction
+
+
+def test_user_memory_language_profile_tracks_dominant_language(tmp_path) -> None:
+    store = UserMemoryStore(str(tmp_path))
+
+    store.update_language_profile("42", "Bobczak", LANGUAGE_DEFAULT)
+    store.update_language_profile("42", "Bobczak", LANGUAGE_DEFAULT)
+    store.update_language_profile("42", "Bobczak", LANGUAGE_ENGLISH)
+    memory = store.load("42", "Bobczak")
+
+    assert store.dominant_language(memory) == LANGUAGE_DEFAULT
+    assert "Deutsch/Bayrisch=2" in memory
+    assert "English=1" in memory
