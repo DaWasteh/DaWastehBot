@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import re
 import time
 from collections import deque
 
@@ -77,11 +78,13 @@ class LLMClient:
             "temperature": settings.llm_temperature,
             "max_tokens": settings.llm_max_tokens,
             "top_p": settings.llm_top_p,
-            # llama.cpp-spezifisch, hilft kleinen Modellen gegen Wiederholungen.
-            "repeat_penalty": settings.llm_repeat_penalty,
             "stop": self._stop,
             "stream": False,
         }
+        # llama.cpp-spezifisch, hilft kleinen Modellen gegen Wiederholungen.
+        # Nicht Teil der OpenAI-Spec, daher optional (siehe Config).
+        if settings.llm_send_repeat_penalty:
+            payload["repeat_penalty"] = settings.llm_repeat_penalty
 
         try:
             async with self._session.post(settings.llm_url, json=payload) as resp:
@@ -221,6 +224,11 @@ class PandaBot(commands.Bot):
         self.chat_history: deque[str] = deque(maxlen=settings.history_length)
         self._broadcaster: twitchio.PartialUser | None = None
 
+        # Echter Twitch-Login-Name des Bot-Accounts. Wird in event_ready aus
+        # der bot_id aufgelöst, damit Erwähnungen am tatsächlichen Account-Namen
+        # hängen und nicht am kosmetischen bot_name (Spitzname).
+        self._bot_login: str | None = None
+
         self._last_activity = time.monotonic()
         # Lock statt bool-Flag: verhindert sauber parallele LLM-Aufrufe.
         self._llm_lock = asyncio.Lock()
@@ -243,22 +251,28 @@ class PandaBot(commands.Bot):
 
     async def event_ready(self) -> None:
         await self.llm.open()
+        # Echten Login-Namen des Bot-Accounts merken (z. B. "dawastehbot").
+        # Daran erkennen wir später @-Erwähnungen zuverlässig.
+        if self.user is not None:
+            self._bot_login = self.user.name
         # Kontext einmal initial laden, damit der erste Prompt schon stimmt.
         if self._broadcaster:
             await self.context.refresh(self, self._broadcaster)
         self.idle_chatter.start()
         LOGGER.info(
-            "PandaBot (%s) ist online und mit %s verbunden!",
+            "PandaBot (%s, Account: %s) ist online und mit %s verbunden!",
             settings.bot_name,
+            self._bot_login or "?",
             settings.channel_name,
         )
 
-    async def close(self) -> None:
+    async def close(self, **options: object) -> None:
         # Sauberes Herunterfahren: Routine stoppen, Session schließen.
-        if self.idle_chatter.running:
-            self.idle_chatter.cancel()
+        # cancel() ist intern gegen "kein laufender Task" abgesichert, daher
+        # kein vorheriger Status-Check nötig (Routine hat kein .running).
+        self.idle_chatter.cancel()
         await self.llm.close()
-        await super().close()
+        await super().close(**options)
 
     # ----- Chat-Handling ----------------------------------------------------- #
     async def event_message(self, payload: twitchio.ChatMessage) -> None:
@@ -267,7 +281,9 @@ class PandaBot(commands.Bot):
             self.chat_history.append(f"{settings.bot_name}: {payload.text}")
             return
 
-        author = payload.chatter.display_name or payload.chatter.name
+        # display_name und name sind laut Typ optional; mit der (immer
+        # vorhandenen) ID als Fallback ist author garantiert ein str.
+        author = payload.chatter.display_name or payload.chatter.name or str(payload.chatter.id)
         text = payload.text.strip()
         if not text:
             return
@@ -284,12 +300,23 @@ class PandaBot(commands.Bot):
 
     def _is_mention(self, text: str) -> bool:
         lowered = text.lower()
-        triggers = (
-            settings.bot_name.lower(),
-            f"@{settings.bot_name.lower()}",
-            "pandabot",
-        )
-        return any(t in lowered for t in triggers)
+        # Trigger-Namen: der echte Login-Name des Bot-Accounts (sobald bekannt)
+        # und der kosmetische Anzeigename. Doppelte werden über das set entfernt.
+        names = {settings.bot_name.lower()}
+        if self._bot_login:
+            names.add(self._bot_login.lower())
+
+        for name in names:
+            if not name:
+                continue
+            # @name trifft immer (eindeutige Erwähnung).
+            if f"@{name}" in lowered:
+                return True
+            # Name ohne @ nur als eigenständiges Wort, damit nicht zufällige
+            # Substrings (z. B. in anderen Wörtern) fälschlich triggern.
+            if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", lowered):
+                return True
+        return False
 
     async def _respond(
         self,
@@ -373,7 +400,7 @@ class PandaBot(commands.Bot):
         if not frage:
             await ctx.reply("Frag mich was! Beispiel: !panda wie läuft's?")
             return
-        author = ctx.chatter.display_name or ctx.chatter.name
+        author = ctx.chatter.display_name or ctx.chatter.name or str(ctx.chatter.id)
         if self._broadcaster:
             await self.context.refresh(self, self._broadcaster)
         system_prompt = build_system_prompt(self.context)

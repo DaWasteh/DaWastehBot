@@ -27,9 +27,9 @@ jobs:
       - name: Ruff installieren
         run: pip install ruff
       - name: Ruff Check
-        run: ruff check pandabot.py config.py test_pandabot.py
+        run: ruff check pandabot.py config.py test_pandabot.py conftest.py
       - name: Ruff Format Check
-        run: ruff format --check pandabot.py config.py test_pandabot.py
+        run: ruff format --check pandabot.py config.py test_pandabot.py conftest.py
 
   test:
     name: Import & Tests (Python ${{ matrix.python-version }})

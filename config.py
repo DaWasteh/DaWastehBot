@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass, field
 
 try:
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv  # type: ignore[import-not-found]
 
     load_dotenv()
 except ModuleNotFoundError:  # python-dotenv ist optional
@@ -52,6 +52,14 @@ class Settings:
     llm_top_p: float = field(default_factory=lambda: float(os.getenv("LLM_TOP_P", "0.9")))
     llm_repeat_penalty: float = field(
         default_factory=lambda: float(os.getenv("LLM_REPEAT_PENALTY", "1.15"))
+    )
+    # repeat_penalty ist ein llama.cpp-Extra (nicht Teil der OpenAI-Spec).
+    # Bei anderen Backends (z. B. vLLM) heißt der Parameter anders bzw. wird
+    # nur über extra_body akzeptiert; auf "false" setzen, um ihn wegzulassen.
+    llm_send_repeat_penalty: bool = field(
+        default_factory=lambda: (
+            os.getenv("LLM_SEND_REPEAT_PENALTY", "true").lower() not in ("0", "false", "no")
+        )
     )
     llm_max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "80")))
     llm_timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "20")))

@@ -8,7 +8,7 @@ offline, ohne Cloud-API.
 
 ## Was kann der Bot?
 
-- **Mitlesen & antworten:** Reagiert, wenn jemand „PandaBot" schreibt oder ihn mit `@` erwähnt.
+- **Mitlesen & antworten:** Reagiert, wenn jemand den Bot beim Namen nennt – sowohl beim echten Account-Namen (z. B. `@dawastehbot`) als auch bei einem optionalen Spitznamen aus `TWITCH_BOT_NAME`.
 - **Chatverlauf als Kontext:** Die letzten Nachrichten fließen in jede Antwort ein, damit der Bot dem Gespräch folgt.
 - **Live-Streamkontext:** Aktuelles Spiel und Stream-Titel werden automatisch über die Twitch-API geholt und in den Prompt eingebaut.
 - **Bei Stille aktiv:** Ist der Chat eine Weile ruhig (und der Stream live), wirft der Bot von selbst einen Gesprächsaufhänger ein.
@@ -71,13 +71,21 @@ TWITCH_CLIENT_SECRET=dein_client_secret
 TWITCH_BOT_ID=123456789       # User-ID des Bot-Accounts
 TWITCH_OWNER_ID=987654321     # Deine eigene User-ID (der Kanal)
 TWITCH_CHANNEL=dawasteh
-TWITCH_BOT_NAME=PandaBot
+TWITCH_BOT_NAME=PandaBot      # optionaler Spitzname, auf den der Bot zusätzlich hört
 
 LLM_SERVER_URL=http://127.0.0.1:1235/v1/chat/completions
 ```
 
 Alle weiteren Werte (Temperatur, Idle-Zeit usw.) haben sinnvolle Defaults und
 sind in `.env.example` dokumentiert.
+
+> **Wie hört der Bot auf seinen Namen?** Der Bot erkennt seinen **echten
+> Twitch-Account-Namen** automatisch (er löst ihn beim Start aus der
+> `TWITCH_BOT_ID` auf) – `@dawastehbot` oder einfach `dawastehbot` im Chat
+> sprechen ihn also direkt an. `TWITCH_BOT_NAME` ist ein **zusätzlicher**
+> Spitzname (z. B. „PandaBot"), auf den er ebenfalls reagiert und der in
+> Prompts/Logs auftaucht. Beides wird als eigenständiges Wort erkannt, damit
+> nicht zufällige Wortbestandteile fälschlich triggern.
 
 ## Einmalige Autorisierung (OAuth)
 
@@ -118,6 +126,14 @@ llama-server -m /pfad/zu/deinem-modell.gguf --port 1235 -c 4096
 > dreh `LLM_REPEAT_PENALTY` in der `.env` schrittweise hoch (z. B. auf `1.2`).
 > Werden sie zu wirr, senke `LLM_TEMPERATURE`.
 
+> **Modell-agnostisch:** Der Bot spricht nur die OpenAI-kompatible
+> `chat/completions`-Schnittstelle, das Modell ist also frei wählbar – ob
+> MiniCPM, ein LFM-2.5 oder ein größeres Modell, am Code ändert sich nichts,
+> nur `LLM_MODEL` bzw. der mit `llama-server` geladene Checkpoint. Wechselst du
+> das **Backend** (z. B. auf vLLM), kennt dieses den llama.cpp-eigenen
+> `repeat_penalty` evtl. nicht – setze dann `LLM_SEND_REPEAT_PENALTY=false`,
+> damit der Parameter weggelassen wird.
+
 ## Benutzung
 
 Ist beides gestartet (LLM-Server **und** Bot), läuft alles automatisch:
@@ -133,7 +149,8 @@ Ist beides gestartet (LLM-Server **und** Bot), läuft alles automatisch:
 | `pandabot.py` | Hauptlogik: Bot, LLM-Client, Stream-Kontext, Idle-Routine |
 | `config.py` | Lädt die Konfiguration aus `.env` / Umgebungsvariablen |
 | `.env.example` | Vorlage für deine Konfiguration |
-| `test_pandabot.py` | Tests für die Antwort-Aufbereitung |
+| `test_pandabot.py` | Tests für Antwort-Aufbereitung und Erwähnungs-Erkennung |
+| `conftest.py` | Pytest-Setup (Dummy-Env), damit Tests eigenständig laufen |
 | `.github/workflows/ci.yml` | CI: Lint (ruff) + Tests auf Python 3.11–3.13 |
 
 ## Konfigurationsreferenz
@@ -142,7 +159,8 @@ Ist beides gestartet (LLM-Server **und** Bot), läuft alles automatisch:
 |----------|---------|-----------|
 | `LLM_TEMPERATURE` | `0.7` | Kreativität (höher = bunter, wirrer) |
 | `LLM_TOP_P` | `0.9` | Nucleus-Sampling |
-| `LLM_REPEAT_PENALTY` | `1.15` | Strafe gegen Wiederholungen |
+| `LLM_REPEAT_PENALTY` | `1.15` | Strafe gegen Wiederholungen (llama.cpp) |
+| `LLM_SEND_REPEAT_PENALTY` | `true` | `repeat_penalty` mitschicken? Bei Nicht-llama.cpp-Backends ggf. `false` |
 | `LLM_MAX_TOKENS` | `80` | Maximale Antwortlänge |
 | `LLM_TIMEOUT` | `20` | Sekunden, bis ein LLM-Aufruf abbricht |
 | `HISTORY_LENGTH` | `12` | Wie viele Chat-Zeilen als Kontext dienen |
