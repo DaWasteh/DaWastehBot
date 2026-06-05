@@ -47,11 +47,11 @@ class LLMClient:
         # Stop-Strings verhindern, dass kleine Modelle sich selbst als weitere
         # Chatter halluzinieren und einen ganzen Fake-Dialog schreiben.
         self._stop = [
-            "\n",
             f"{settings.bot_name}:",
             "User:",
             "Chat:",
-            "<|",
+            "<|im_start|>",
+            "<|im_end|>",
         ]
 
     async def open(self) -> None:
@@ -84,6 +84,10 @@ class LLMClient:
             "top_p": settings.llm_top_p,
             "stop": self._stop,
             "stream": False,
+            # llama.cpp / Thinking-Modelle: MiniCPM/Qwen-artige Modelle liefern
+            # sonst oft nur reasoning_content und ein leeres message.content.
+            "chat_template_kwargs": {"enable_thinking": False},
+            "reasoning_budget": 0,
         }
         # llama.cpp-spezifisch, hilft kleinen Modellen gegen Wiederholungen.
         # Nicht Teil der OpenAI-Spec, daher optional (siehe Config).
@@ -110,7 +114,10 @@ class LLMClient:
             LOGGER.warning("Unerwartetes Antwortformat: %r", data)
             return None
 
-        return self._sanitize(reply)
+        sanitized = self._sanitize(reply)
+        if not sanitized:
+            LOGGER.warning("LLM-Rohantwort war leer/unbrauchbar: %r", reply)
+        return sanitized
 
     def _sanitize(self, text: str | None) -> str | None:
         """Räumt typische Artefakte kleiner Modelle auf."""
@@ -119,8 +126,14 @@ class LLMClient:
 
         text = text.strip()
 
+        # Thinking-Modelle liefern oft interne Gedanken vor der eigentlichen Antwort.
+        text = re.sub(r"(?is)<think>.*?</think>", "", text).strip()
+        if text.lower().startswith("<think>"):
+            text = text[len("<think>") :].strip()
+        text = re.sub(r"\s+", " ", text).strip()
+
         # Manche Modelle stellen den eigenen Namen voran ("PandaBot: ...").
-        for prefix in (f"{settings.bot_name}:", "PandaBot:", "Bot:"):
+        for prefix in (f"{settings.bot_name}:", "PandaBot:", "Bot:", "Assistant:"):
             if text.lower().startswith(prefix.lower()):
                 text = text[len(prefix) :].strip()
 
@@ -332,12 +345,21 @@ class PandaBot(commands.Bot):
 
         self._last_activity = time.monotonic()
         self.chat_history.append(f"{author}: {text}")
+        LOGGER.info("Chat empfangen von %s: %s", author, text)
 
-        # !-Befehle laufen weiter durch die normale Command-Verarbeitung.
+        # Direkter Befehl ohne TwitchIO-Command-Registry, damit es auch aus der
+        # Bot-Subclass zuverlässig funktioniert.
+        if text.lower().startswith("!panda"):
+            frage = text[len("!panda") :].strip()
+            await self._respond(payload, author=author, trigger=frage or text)
+            return
+
+        # Andere !-Befehle ignorieren.
         if text.startswith("!"):
             return
 
         if self._is_mention(text):
+            LOGGER.info("Erwähnung erkannt von %s", author)
             await self._respond(payload, author=author, trigger=text)
 
     def _is_mention(self, text: str) -> bool:
@@ -391,11 +413,13 @@ class PandaBot(commands.Bot):
             reply = await self.llm.complete(system_prompt, user_prompt)
 
         if not reply:
+            LOGGER.warning("LLM hat keine brauchbare Antwort geliefert")
             return
 
         try:
             # respond() sendet die Nachricht in den Kanal der Ursprungsnachricht.
             await payload.respond(reply)
+            LOGGER.info("Antwort gesendet: %s", reply)
         except Exception:  # noqa: BLE001
             LOGGER.exception("Konnte Nachricht nicht senden")
 
@@ -453,7 +477,9 @@ class PandaBot(commands.Bot):
         )
         async with self._llm_lock:
             reply = await self.llm.complete(system_prompt, user_prompt)
-        await ctx.reply(reply or "Mein KI-Hirn macht gerade Pause 🐼")
+        answer = reply or "Mein KI-Hirn macht gerade Pause 🐼"
+        await ctx.reply(answer)
+        LOGGER.info("Command-Antwort gesendet: %s", answer)
 
 
 # --------------------------------------------------------------------------- #
