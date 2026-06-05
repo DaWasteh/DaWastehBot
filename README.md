@@ -1,10 +1,10 @@
 # 🐼 PandaBot
 
-Ein lokaler KI-Chatbot für Twitch. PandaBot verbindet deinen Kanal über
-[TwitchIO 3](https://twitchio.dev) (EventSub) mit einem lokalen Sprachmodell auf
-einem [llama-server](https://github.com/ggml-org/llama.cpp), folgt dem Chat,
-antwortet auf Erwähnungen und sorgt bei Stille für Unterhaltung – komplett
-offline, ohne Cloud-API.
+Ein KI-Chatbot für Twitch. PandaBot verbindet deinen Kanal über
+[TwitchIO 3](https://twitchio.dev) (EventSub) wahlweise mit einem lokalen
+[llama-server](https://github.com/ggml-org/llama.cpp) oder online mit Google
+Gemma 4 31B IT, folgt dem Chat, antwortet auf Erwähnungen und sorgt bei Stille
+für Unterhaltung.
 
 ## Was kann der Bot?
 
@@ -13,7 +13,7 @@ offline, ohne Cloud-API.
 - **Live-Streamkontext:** Aktuelles Spiel und Stream-Titel werden automatisch über die Twitch-API geholt und in den Prompt eingebaut.
 - **Bei Stille aktiv:** Ist der Chat eine Weile ruhig (und der Stream live), wirft der Bot von selbst einen Gesprächsaufhänger ein.
 - **`!panda <frage>`-Befehl:** Direkter Draht zum Bot.
-- **Robust:** Ist der LLM-Server mal weg, schweigt der Bot einfach, statt abzustürzen.
+- **Robust:** Ist das LLM-Backend mal weg, schweigt der Bot einfach, statt abzustürzen.
 
 ## ⚠️ Wichtig: TwitchIO 3 statt 2
 
@@ -28,7 +28,7 @@ du musst das nur **einmal** machen.
 ## Voraussetzungen
 
 - **Python 3.11 oder neuer** (TwitchIO 3 verlangt das)
-- Ein laufender **llama-server** mit deinem Modell (z. B. MiniCPM)
+- Entweder ein laufender **llama-server** mit deinem Modell oder ein **Google AI Studio API-Key**
 - Zwei Twitch-Accounts: dein **Kanal** und ein separater **Bot-Account** (empfohlen)
 
 ## Installation
@@ -73,11 +73,15 @@ TWITCH_OWNER_ID=987654321     # Deine eigene User-ID (der Kanal)
 TWITCH_CHANNEL=dawasteh
 TWITCH_BOT_NAME=PandaBot      # optionaler Spitzname, auf den der Bot zusätzlich hört
 
+LLM_BACKEND=ask   # fragt beim Start: lokal oder online?
 LLM_SERVER_URL=http://127.0.0.1:1235/v1/chat/completions
+
+# Optional für Online-Modus mit Google Gemma 4 31B IT:
+GOOGLE_API_KEY=dein_google_ai_studio_key
 ```
 
-Alle weiteren Werte (Temperatur, Idle-Zeit usw.) haben sinnvolle Defaults und
-sind in `.env.example` dokumentiert.
+Alle weiteren Werte (Temperatur, Idle-Zeit, Google-Modell usw.) haben sinnvolle
+Defaults und sind in `.env.example` dokumentiert.
 
 > **Wie hört der Bot auf seinen Namen?** Der Bot erkennt seinen **echten
 > Twitch-Account-Namen** automatisch (er löst ihn beim Start aus der
@@ -112,7 +116,28 @@ Diesen Ablauf musst du **nur einmal** durchführen (oder wenn du die Scopes änd
 Fertig. Ab jetzt verbindet sich der Bot bei jedem Start automatisch – die Tokens
 liegen in `.tio.tokens.json` und werden selbstständig erneuert.
 
-## LLM-Server starten
+## LLM auswählen
+
+Beim Start fragt PandaBot standardmäßig:
+
+```text
+[1] Lokal: llama-server
+[2] Online: Google Gemma 4 31B IT
+```
+
+Mit `LLM_BACKEND=local` oder `LLM_BACKEND=online` in der `.env` kannst du die
+Abfrage überspringen. Für den Online-Modus brauchst du einen API-Key aus
+[Google AI Studio](https://aistudio.google.com/app/apikey):
+
+```env
+GOOGLE_API_KEY=dein_google_ai_studio_key
+GOOGLE_LLM_MODEL=gemma-4-31b-it
+```
+
+Der Online-Modus nutzt den OpenAI-kompatiblen Gemini-Endpunkt und schaltet
+llama.cpp-spezifische Felder wie `repeat_penalty` automatisch ab.
+
+## Lokalen LLM-Server starten
 
 Beispielhaft mit `llama-server` aus llama.cpp (Port an deine `.env` anpassen):
 
@@ -136,7 +161,7 @@ llama-server -m /pfad/zu/deinem-modell.gguf --port 1235 -c 4096
 
 ## Benutzung
 
-Ist beides gestartet (LLM-Server **und** Bot), läuft alles automatisch:
+Ist ein LLM-Backend ausgewählt/erreichbar und der Bot gestartet, läuft alles automatisch:
 
 - Schreibe im Chat `PandaBot, wie geht's?` → der Bot antwortet.
 - Nutze `!panda Was hältst du vom Spiel?` für einen direkten Befehl.
@@ -157,12 +182,18 @@ Ist beides gestartet (LLM-Server **und** Bot), läuft alles automatisch:
 
 | Variable | Default | Bedeutung |
 |----------|---------|-----------|
+| `LLM_BACKEND` | `ask` | `ask`, `local` oder `online` |
 | `LLM_TEMPERATURE` | `0.7` | Kreativität (höher = bunter, wirrer) |
 | `LLM_TOP_P` | `0.9` | Nucleus-Sampling |
 | `LLM_REPEAT_PENALTY` | `1.15` | Strafe gegen Wiederholungen (llama.cpp) |
-| `LLM_SEND_REPEAT_PENALTY` | `true` | `repeat_penalty` mitschicken? Bei Nicht-llama.cpp-Backends ggf. `false` |
-| `LLM_MAX_TOKENS` | `80` | Maximale Antwortlänge |
-| `LLM_TIMEOUT` | `20` | Sekunden, bis ein LLM-Aufruf abbricht |
+| `LLM_SEND_REPEAT_PENALTY` | `true` | `repeat_penalty` mitschicken? Online wird automatisch deaktiviert |
+| `LLM_SEND_LLAMA_EXTRAS` | `true` | llama.cpp-Thinking-Extras mitschicken? Online wird automatisch deaktiviert |
+| `LLM_MAX_TOKENS` | `80` | Maximale Antwortlänge lokal |
+| `LLM_TIMEOUT` | `20` | Sekunden, bis ein lokaler LLM-Aufruf abbricht |
+| `GOOGLE_API_KEY` | leer | API-Key für Google AI Studio / Gemini API |
+| `GOOGLE_LLM_MODEL` | `gemma-4-31b-it` | Online-Modell |
+| `GOOGLE_LLM_MAX_TOKENS` | `120` | Maximale Antwortlänge online |
+| `GOOGLE_LLM_TIMEOUT` | `30` | Timeout für Online-Aufrufe |
 | `HISTORY_LENGTH` | `12` | Wie viele Chat-Zeilen als Kontext dienen |
 | `IDLE_THRESHOLD` | `300` | Sekunden Stille bis zur Eigeninitiative |
 | `CONTEXT_TTL` | `120` | Cache-Dauer für Titel/Spiel in Sekunden |
@@ -175,7 +206,7 @@ dürfen **niemals** committet werden – sie enthalten deine Secrets bzw. Tokens
 ## Fehlersuche
 
 - **„Pflicht-Variable … fehlt":** Deine `.env` ist unvollständig – vergleiche mit `.env.example`.
-- **Bot startet, sagt aber nichts:** Läuft der `llama-server` unter der `LLM_SERVER_URL`? Check die Logs auf „llama-server nicht erreichbar".
+- **Bot startet, sagt aber nichts:** Bei `local`: Läuft der `llama-server` unter der `LLM_SERVER_URL`? Bei `online`: Ist `GOOGLE_API_KEY` gesetzt und gültig? Check die Logs auf „LLM-Backend nicht erreichbar".
 - **Keine Reaktion im Chat:** Wurde die Autorisierung für **beide** Accounts durchgeführt? Lösche notfalls `.tio.tokens.json` und wiederhole den OAuth-Schritt.
 - **Idle-Nachrichten kommen nicht:** Der Bot wird nur aktiv, wenn der Stream **live** ist.
 

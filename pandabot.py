@@ -1,7 +1,7 @@
 """PandaBot - Ein lokaler KI-Chatbot für Twitch.
 
 Verbindet einen Twitch-Kanal via TwitchIO 3 (EventSub über WebSocket) mit einem
-lokalen LLM (llama-server, OpenAI-kompatibel). Der Bot folgt dem Chat, antwortet
+LLM (lokaler llama-server oder Google/Gemma, OpenAI-kompatibel). Der Bot folgt dem Chat, antwortet
 auf Erwähnungen und sorgt bei Stille für Unterhaltung. Stream-Titel und Spiel
 werden live über die Twitch-Helix-API geholt.
 
@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import getpass
 import logging
 import re
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -356,10 +358,10 @@ def language_final_reminder(language: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-#  LLM-Client (llama-server, OpenAI-kompatibel)
+#  LLM-Client (OpenAI-kompatibel)
 # --------------------------------------------------------------------------- #
 class LLMClient:
-    """Kapselt die Kommunikation mit dem lokalen llama-server.
+    """Kapselt die Kommunikation mit dem ausgewählten LLM-Backend.
 
     Hält eine wiederverwendete aiohttp-Session offen (statt pro Anfrage eine
     neue aufzubauen) und kümmert sich um Timeouts, Stop-Strings und das
@@ -431,25 +433,36 @@ class LLMClient:
             "top_p": settings.llm_top_p,
             "stop": self._stop,
             "stream": False,
-            # llama.cpp / Thinking-Modelle: MiniCPM/Qwen-artige Modelle liefern
-            # sonst oft nur reasoning_content und ein leeres message.content.
-            "chat_template_kwargs": {"enable_thinking": False, "thinking": False},
-            "reasoning_budget": 0,
         }
+        # Die Assistant-Prefix-Hilfe ist für lokale Thinking-Templates gedacht;
+        # Online/OpenAI-kompatible Backends bekommen nur System+User.
+        if not settings.llm_send_llama_extras:
+            payload["messages"] = payload["messages"][:2]
+
+        # llama.cpp / Thinking-Modelle: MiniCPM/Qwen-artige Modelle liefern
+        # sonst oft nur reasoning_content und ein leeres message.content.
+        # Online-Backends wie Google/Gemma kennen diese Extras nicht.
+        if settings.llm_send_llama_extras:
+            payload["chat_template_kwargs"] = {"enable_thinking": False, "thinking": False}
+            payload["reasoning_budget"] = 0
         # llama.cpp-spezifisch, hilft kleinen Modellen gegen Wiederholungen.
         # Nicht Teil der OpenAI-Spec, daher optional (siehe Config).
         if settings.llm_send_repeat_penalty:
             payload["repeat_penalty"] = settings.llm_repeat_penalty
 
+        headers = (
+            {"Authorization": f"Bearer {settings.llm_api_key}"} if settings.llm_api_key else None
+        )
+
         try:
-            async with self._session.post(settings.llm_url, json=payload) as resp:
+            async with self._session.post(settings.llm_url, json=payload, headers=headers) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    LOGGER.warning("llama-server HTTP %s: %s", resp.status, body[:200])
+                    LOGGER.warning("LLM-Backend HTTP %s: %s", resp.status, body[:200])
                     return None
                 data = await resp.json()
         except (aiohttp.ClientError, TimeoutError) as exc:
-            LOGGER.warning("llama-server nicht erreichbar: %s", exc)
+            LOGGER.warning("LLM-Backend nicht erreichbar: %s", exc)
             return None
         except Exception:  # noqa: BLE001 - defensiv, Bot soll nie crashen
             LOGGER.exception("Unerwarteter Fehler beim LLM-Aufruf")
@@ -1340,8 +1353,67 @@ class PandaBot(commands.Bot):
 # --------------------------------------------------------------------------- #
 #  Entry-Point
 # --------------------------------------------------------------------------- #
+def _select_llm_backend() -> None:
+    """Fragt beim Start, ob PandaBot lokal oder online antworten soll."""
+    configured = settings.llm_backend.strip().lower()
+    if configured in (
+        "1",
+        "l",
+        "local",
+        "lokal",
+        "llama",
+        "llama-server",
+        "2",
+        "o",
+        "online",
+        "google",
+        "gemini",
+        "gemma",
+    ):
+        settings.apply_llm_backend(configured)
+        LOGGER.info("LLM-Profil: %s", settings.llm_backend_label)
+        return
+    if configured not in ("", "ask", "prompt", "frage"):
+        raise ValueError("LLM_BACKEND muss 'ask', 'local' oder 'online' sein.")
+
+    if not sys.stdin.isatty():
+        settings.apply_llm_backend("local")
+        LOGGER.info(
+            "Kein interaktives Terminal erkannt; nutze LLM-Profil: %s", settings.llm_backend_label
+        )
+        return
+
+    prompt = (
+        "\nPandaBot LLM auswählen:\n"
+        f"  [1] Lokal: llama-server ({settings.llm_model} @ {settings.llm_url})\n"
+        f"  [2] Online: Google Gemma 4 31B IT ({settings.google_llm_model})\n"
+        "Auswahl [1/2, Enter=1]: "
+    )
+    while True:
+        choice = input(prompt).strip().lower() or "1"
+        if choice in ("1", "l", "local", "lokal", "llama", "llama-server"):
+            settings.apply_llm_backend("local")
+            break
+        if choice in ("2", "o", "online", "google", "gemini", "gemma"):
+            if not (settings.google_api_key or settings.llm_api_key):
+                key = getpass.getpass(
+                    "GOOGLE_API_KEY/GEMINI_API_KEY nicht gefunden. "
+                    "API-Key jetzt eingeben (leer = lokal): "
+                ).strip()
+                if not key:
+                    settings.apply_llm_backend("local")
+                    break
+                settings.google_api_key = key
+            settings.apply_llm_backend("online")
+            break
+        print("Bitte 1/lokal oder 2/online eingeben.")
+
+    LOGGER.info("LLM-Profil: %s", settings.llm_backend_label)
+
+
 def main() -> None:
     twitchio.utils.setup_logging(level=logging.INFO)
+    _select_llm_backend()
 
     async def runner() -> None:
         async with PandaBot() as bot:

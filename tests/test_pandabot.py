@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from config import Settings
 from pandabot import (
     LANGUAGE_DEFAULT,
     LANGUAGE_ENGLISH,
@@ -117,6 +118,30 @@ def test_language_instruction_current_message_overrides_memory_language() -> Non
 
     assert "Reply to this message in natural English only" in instruction
     assert "darf die aktuelle Antwortsprache NICHT überschreiben" in instruction
+
+
+def test_apply_online_llm_backend_uses_google_profile() -> None:
+    settings_obj = Settings()
+    settings_obj.google_api_key = "test-key"
+
+    settings_obj.apply_llm_backend("online")
+
+    assert settings_obj.llm_backend == "online"
+    assert settings_obj.llm_model == "gemma-4-31b-it"
+    assert settings_obj.llm_api_key == "test-key"
+    assert settings_obj.llm_send_repeat_penalty is False
+    assert settings_obj.llm_send_llama_extras is False
+    assert settings_obj.llm_max_tokens == 120
+    assert settings_obj.llm_timeout == 30
+
+
+def test_apply_online_llm_backend_requires_api_key() -> None:
+    settings_obj = Settings()
+    settings_obj.google_api_key = None
+    settings_obj.llm_api_key = None
+
+    with pytest.raises(RuntimeError):
+        settings_obj.apply_llm_backend("online")
 
 
 def test_user_memory_language_profile_tracks_dominant_language(tmp_path) -> None:
