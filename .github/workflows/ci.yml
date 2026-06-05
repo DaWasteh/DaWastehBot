@@ -37,8 +37,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TwitchIO 3 verlangt mindestens Python 3.11.
-        python-version: ["3.11", "3.12", "3.13"]
+        # TwitchIO 3 verlangt mindestens Python 3.11; 3.14 ist lokal bereits im Einsatz.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
