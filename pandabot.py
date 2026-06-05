@@ -151,6 +151,12 @@ LANGUAGE_WORDS: dict[str, set[str]] = {
         "siema",
         "hej",
         "witam",
+        "podaj",
+        "daj",
+        "mi",
+        "na",
+        "do",
+        "z",
         "co",
         "jak",
         "dlaczego",
@@ -167,6 +173,22 @@ LANGUAGE_WORDS: dict[str, set[str]] = {
         "opowiedz",
         "wyjaśnij",
         "wyjasnij",
+        "przepis",
+        "świetne",
+        "swietne",
+        "dobry",
+        "dobre",
+        "makaron",
+        "sos",
+        "mięso",
+        "mieso",
+        "cebula",
+        "czosnek",
+        "pomidory",
+        "gotuj",
+        "podsmaż",
+        "podsmaz",
+        "dodaj",
         "ja",
         "ty",
         "twój",
@@ -311,6 +333,28 @@ def language_reply_instruction(current_language: str, dominant_language: str | N
     )
 
 
+def language_final_label(language: str) -> str:
+    if language == LANGUAGE_ENGLISH:
+        return "Answer"
+    if language in {LANGUAGE_SWEDISH, LANGUAGE_ICELANDIC}:
+        return "Svar"
+    if language == LANGUAGE_POLISH:
+        return "Odpowiedź"
+    return "Antwort"
+
+
+def language_final_reminder(language: str) -> str:
+    if language == LANGUAGE_ENGLISH:
+        return "IMPORTANT: Reply only in English. Do not use German."
+    if language == LANGUAGE_SWEDISH:
+        return "VIKTIGT: Svara bara på svenska. Använd inte tyska."
+    if language == LANGUAGE_ICELANDIC:
+        return "MIKILVÆGT: Svaraðu aðeins á íslensku. Ekki nota þýsku."
+    if language == LANGUAGE_POLISH:
+        return "WAŻNE: Odpowiedz wyłącznie po polsku. Nie używaj niemieckiego."
+    return "WICHTIG: Antworte auf Deutsch/Bayrisch. Wechsle nicht ungefragt die Sprache."
+
+
 # --------------------------------------------------------------------------- #
 #  LLM-Client (llama-server, OpenAI-kompatibel)
 # --------------------------------------------------------------------------- #
@@ -343,7 +387,14 @@ class LLMClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def complete(self, system_prompt: str, user_prompt: str) -> str | None:
+    async def complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        final_label: str = "Antwort",
+        final_language_reminder: str | None = None,
+    ) -> str | None:
         """Schickt einen Chat-Completion-Request und gibt die Antwort zurück.
 
         Gibt ``None`` zurück, wenn der Server nicht erreichbar ist oder eine
@@ -352,6 +403,10 @@ class LLMClient:
         """
         await self.open()
         assert self._session is not None
+
+        language_reminder = final_language_reminder or (
+            "Verwende exakt die im Prompt geforderte Antwortsprache; kein ungefragter Sprachwechsel."
+        )
 
         payload = {
             "model": settings.llm_model,
@@ -362,14 +417,14 @@ class LLMClient:
                     "content": (
                         f"{user_prompt}\n\n"
                         "WICHTIG: Gib NUR die finale Twitch-Chat-Antwort aus. "
-                        "Sprich den Fragesteller direkt mit du an, nie in der dritten Person. "
+                        "Sprich den Fragesteller direkt in der passenden informellen Anrede an, nie in der dritten Person. "
                         "Keine Analyse, keine Gedanken, kein Markdown/Fettdruck, kein Wiederholen der Frage, kein 'We need'. "
-                        "Verwende exakt die im Prompt geforderte Antwortsprache; kein ungefragter Sprachwechsel."
+                        f"{language_reminder}"
                     ),
                 },
                 # MiniCPM5/Thinking-Templates starten sonst gern mit CoT. Diese
                 # Prefix-Hilfe schließt den Thinking-Block und lenkt auf Finalausgabe.
-                {"role": "assistant", "content": "<think></think>\nAntwort:"},
+                {"role": "assistant", "content": f"<think></think>\n{final_label}:"},
             ],
             "temperature": settings.llm_temperature,
             "max_tokens": settings.llm_max_tokens,
@@ -429,12 +484,25 @@ class LLMClient:
 
         # Wenn wir die Ausgabe mit "Antwort:" geprefillt haben, nur den finalen
         # Teil danach behalten.
-        marker_match = re.search(r"(?i)(?:^|\s)(?:finale?\s+)?antwort\s*:\s*", text)
+        marker_match = re.search(
+            r"(?i)(?:^|\s)(?:finale?\s+)?(?:antwort|answer|svar|odpowiedź|odpowiedz)\s*:\s*",
+            text,
+        )
         if marker_match:
             text = text[marker_match.end() :].strip()
 
         # Manche Modelle stellen den eigenen Namen voran ("PandaBot: ...").
-        for prefix in (f"{settings.bot_name}:", "PandaBot:", "Bot:", "Assistant:", "Antwort:"):
+        for prefix in (
+            f"{settings.bot_name}:",
+            "PandaBot:",
+            "Bot:",
+            "Assistant:",
+            "Antwort:",
+            "Answer:",
+            "Svar:",
+            "Odpowiedź:",
+            "Odpowiedz:",
+        ):
             if text.lower().startswith(prefix.lower()):
                 text = text[len(prefix) :].strip()
 
@@ -1057,6 +1125,47 @@ class PandaBot(commands.Bot):
         except OSError:
             LOGGER.exception("User-Gedächtnis konnte nicht gespeichert werden")
 
+    def _reply_matches_language(self, reply: str, language: str) -> bool:
+        if language == LANGUAGE_DEFAULT:
+            return True
+        return detect_message_language(reply) == language
+
+    async def _complete_reply(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        language: str,
+    ) -> str | None:
+        reply = await self.llm.complete(
+            system_prompt,
+            user_prompt,
+            final_label=language_final_label(language),
+            final_language_reminder=language_final_reminder(language),
+        )
+        if not reply or self._reply_matches_language(reply, language):
+            return reply
+
+        LOGGER.warning(
+            "LLM-Antwort war in der falschen Sprache (%s erwartet): %s",
+            language,
+            reply[:160],
+        )
+        correction_prompt = (
+            f"{user_prompt}\n\n"
+            "Die vorige Antwort war in der falschen Sprache. Schreibe die Antwort komplett neu. "
+            f"{language_final_reminder(language)}"
+        )
+        retry = await self.llm.complete(
+            system_prompt,
+            correction_prompt,
+            final_label=language_final_label(language),
+            final_language_reminder=language_final_reminder(language),
+        )
+        if retry and self._reply_matches_language(retry, language):
+            return retry
+        LOGGER.warning("LLM blieb bei falscher Sprache; Antwort wird verworfen")
+        return None
+
     async def _respond(
         self,
         payload: twitchio.ChatMessage,
@@ -1111,7 +1220,7 @@ class PandaBot(commands.Bot):
                     "Schreibe jetzt nur die natürliche Antwort an diese Person. Keine dritte Person, kein Markdown, keine Frage-Wiederholung."
                 )
 
-                reply = await self.llm.complete(system_prompt, user_prompt)
+                reply = await self._complete_reply(system_prompt, user_prompt, current_language)
 
         if not reply:
             fallback = self._fallback_reply(trigger, current_language)
@@ -1210,7 +1319,7 @@ class PandaBot(commands.Bot):
                     f"Aufgabe: {task}\n"
                     "Schreibe jetzt nur die natürliche Antwort an diese Person. Keine dritte Person, kein Markdown, keine Frage-Wiederholung."
                 )
-                reply = await self.llm.complete(system_prompt, user_prompt)
+                reply = await self._complete_reply(system_prompt, user_prompt, current_language)
         answer = (
             self._polish_reply(reply, trigger=frage, author=author, language=current_language)
             if reply
