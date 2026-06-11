@@ -134,8 +134,10 @@ GOOGLE_API_KEY=dein_google_ai_studio_key
 GOOGLE_LLM_MODEL=gemma-4-31b-it
 ```
 
+Wichtig: Die API-Modell-ID heißt `gemma-4-31b-it`, auch wenn sie über die Gemini API läuft. Falls du versehentlich `gemini-4-31b-it` einträgst, normalisiert PandaBot das beim Start automatisch auf `gemma-4-31b-it`.
+
 Der Online-Modus nutzt den OpenAI-kompatiblen Gemini-Endpunkt und schaltet
-llama.cpp-spezifische Felder wie `repeat_penalty` automatisch ab.
+llama.cpp-spezifische Felder wie `repeat_penalty` automatisch ab. Wenn du VRAM freihalten willst, setze einfach `LLM_BACKEND=online`.
 
 ## Lokalen LLM-Server starten
 
@@ -165,7 +167,7 @@ Ist ein LLM-Backend ausgewählt/erreichbar und der Bot gestartet, läuft alles a
 
 - Schreibe im Chat `PandaBot, wie geht's?` → der Bot antwortet.
 - Nutze `!panda Was hältst du vom Spiel?` für einen direkten Befehl.
-- Bleibt der Chat ruhig, meldet sich der Bot nach `IDLE_THRESHOLD` Sekunden selbst.
+- Bleibt der Chat ruhig, meldet sich der Bot nach `IDLE_THRESHOLD` Sekunden selbst. Danach wartet er bei `IDLE_MAX_SOLO_MESSAGES=1` auf echte Chat-Aktivität, statt allein weiterzureden.
 
 ## Projektstruktur
 
@@ -195,7 +197,8 @@ Ist ein LLM-Backend ausgewählt/erreichbar und der Bot gestartet, läuft alles a
 | `GOOGLE_LLM_MAX_TOKENS` | `120` | Maximale Antwortlänge online |
 | `GOOGLE_LLM_TIMEOUT` | `30` | Timeout für Online-Aufrufe |
 | `HISTORY_LENGTH` | `12` | Wie viele Chat-Zeilen als Kontext dienen |
-| `IDLE_THRESHOLD` | `300` | Sekunden Stille bis zur Eigeninitiative |
+| `IDLE_THRESHOLD` | `900` | Sekunden Stille bis zur Eigeninitiative |
+| `IDLE_MAX_SOLO_MESSAGES` | `1` | Max. eigene Idle-Nachrichten ohne neue echte Chat-Nachricht (`0` deaktiviert Idle) |
 | `CONTEXT_TTL` | `120` | Cache-Dauer für Titel/Spiel in Sekunden |
 
 ## Sicherheit

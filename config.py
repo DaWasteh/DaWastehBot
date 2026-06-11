@@ -105,7 +105,10 @@ class Settings:
 
     # --- Verhalten ---
     history_length: int = field(default_factory=lambda: int(os.getenv("HISTORY_LENGTH", "12")))
-    idle_threshold: int = field(default_factory=lambda: int(os.getenv("IDLE_THRESHOLD", "420")))
+    idle_threshold: int = field(default_factory=lambda: int(os.getenv("IDLE_THRESHOLD", "900")))
+    idle_max_solo_messages: int = field(
+        default_factory=lambda: int(os.getenv("IDLE_MAX_SOLO_MESSAGES", "1"))
+    )
     context_ttl: int = field(default_factory=lambda: int(os.getenv("CONTEXT_TTL", "120")))
     max_message_length: int = 480  # Twitch-Limit ist 500; etwas Puffer.
     user_memory_dir: str = field(
@@ -114,6 +117,16 @@ class Settings:
     user_memory_enabled: bool = field(
         default_factory=lambda: _env_bool("USER_MEMORY_ENABLED", True)
     )
+
+    def _normalized_google_model(self) -> str:
+        """Normalisiert häufige Vertipper/Aliase für das Google-Online-Profil."""
+        model = self.google_llm_model.strip()
+        aliases = {
+            # Die API-Modell-ID heißt Gemma, auch wenn sie über die Gemini API läuft.
+            "gemini-4-31b-it": "gemma-4-31b-it",
+            "google/gemma-4-31b-it": "gemma-4-31b-it",
+        }
+        return aliases.get(model.lower(), model)
 
     def apply_llm_backend(self, backend: str) -> None:
         """Aktiviert zur Laufzeit das lokale oder Google/Gemma-LLM-Profil."""
@@ -131,6 +144,7 @@ class Settings:
                     "Setze GOOGLE_API_KEY oder GEMINI_API_KEY in deiner .env."
                 )
             self.llm_backend = "online"
+            self.google_llm_model = self._normalized_google_model()
             self.llm_backend_label = f"Google Gemini API ({self.google_llm_model})"
             self.llm_url = self.google_llm_url
             self.llm_model = self.google_llm_model

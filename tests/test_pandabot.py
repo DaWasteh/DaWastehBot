@@ -7,9 +7,12 @@ werden kann.
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
-from config import Settings
+from config import Settings, settings
 from pandabot import (
     LANGUAGE_DEFAULT,
     LANGUAGE_ENGLISH,
@@ -30,13 +33,14 @@ def client() -> LLMClient:
 
 
 @pytest.fixture
-def bot() -> PandaBot:
+def bot(monkeypatch: pytest.MonkeyPatch) -> PandaBot:
     """Erzeugt einen Bot und simuliert den Zustand nach event_ready.
 
     Der Konstruktor kommt mit den CI-Dummy-Werten aus den Umgebungsvariablen
     klar. ``_bot_login`` wird hier von Hand gesetzt - zur Laufzeit füllt das
     ``event_ready`` aus ``self.user.name``.
     """
+    monkeypatch.setattr(settings, "bot_name", "PandaBot")
     instance = PandaBot()
     instance._bot_login = "dawastehbot"
     return instance
@@ -69,6 +73,27 @@ def test_sanitize_strips_own_name_case_insensitive(client: LLMClient) -> None:
     assert client._sanitize("pandabot: yo") == "yo"
 
 
+def test_sanitize_removes_complete_think_block(client: LLMClient) -> None:
+    raw = "<think>Ich analysiere intern viel zu lang.</think> Antwort: Servus, klar doch!"
+
+    assert client._sanitize(raw) == "Servus, klar doch!"
+
+
+def test_sanitize_rescues_answer_after_unclosed_think(client: LLMClient) -> None:
+    raw = "<think>Okay, der User fragt nach dem Chat. Antwort: Im Chat war gerade Bot-Testen angesagt."
+
+    assert client._sanitize(raw) == "Im Chat war gerade Bot-Testen angesagt."
+
+
+def test_sanitize_drops_unclosed_think_without_answer(client: LLMClient) -> None:
+    assert client._sanitize("<think>Okay, der User fragt nach dem Prompt") is None
+
+
+def test_reasoning_detector_catches_meta_text(client: LLMClient) -> None:
+    assert client._looks_like_reasoning("Okay, der User fragt nach dem Streamtitel.") is True
+    assert client._looks_like_reasoning("Klar, ich helf dir kurz.") is False
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
@@ -96,6 +121,31 @@ def test_is_mention_without_login_falls_back_to_botname(bot: PandaBot) -> None:
     bot._bot_login = None
     assert bot._is_mention("PandaBot hallo") is True
     assert bot._is_mention("@dawastehbot hallo") is False
+
+
+def test_is_own_message_detects_bot_by_login(bot: PandaBot) -> None:
+    payload = SimpleNamespace(
+        chatter=SimpleNamespace(id="other-id", name="dawastehbot", display_name="DaWastehBot"),
+        text="PandaBot fragt sich selbst was",
+    )
+
+    assert bot._is_own_message(payload) is True
+
+
+def test_is_own_message_does_not_treat_mentions_as_self(bot: PandaBot) -> None:
+    payload = SimpleNamespace(
+        chatter=SimpleNamespace(id="chat-user", name="chatuser", display_name="ChatUser"),
+        text="@dawastehbot bist du da?",
+    )
+
+    assert bot._is_own_message(payload) is False
+
+
+def test_recent_bot_repeat_detection(bot: PandaBot) -> None:
+    bot._remember_bot_message("Was meint ihr zum Bosskampf?")
+
+    assert bot._is_recent_bot_repeat("Was meint ihr zum Bosskampf?") is True
+    assert bot._is_recent_bot_repeat("Ganz andere Frage an den Chat!") is False
 
 
 @pytest.mark.parametrize(
@@ -143,6 +193,16 @@ def test_apply_online_llm_backend_uses_google_profile(monkeypatch: pytest.Monkey
     assert settings_obj.llm_timeout == 30
 
 
+def test_apply_online_llm_backend_normalizes_common_gemini_typo() -> None:
+    settings_obj = Settings()
+    settings_obj.google_api_key = "test-key"
+    settings_obj.google_llm_model = "gemini-4-31b-it"
+
+    settings_obj.apply_llm_backend("online")
+
+    assert settings_obj.llm_model == "gemma-4-31b-it"
+
+
 def test_apply_online_llm_backend_requires_api_key() -> None:
     settings_obj = Settings()
     settings_obj.google_api_key = None
@@ -150,6 +210,54 @@ def test_apply_online_llm_backend_requires_api_key() -> None:
 
     with pytest.raises(RuntimeError):
         settings_obj.apply_llm_backend("online")
+
+
+def test_user_memory_touch_creates_seen_chatter_file(tmp_path) -> None:
+    store = UserMemoryStore(str(tmp_path))
+
+    store.touch("99", "ChatKumpel")
+    memory = store.load("99", "ChatKumpel")
+
+    assert "Twitch-User-ID: 99" in memory
+    assert "Anzeigename zuletzt gesehen: ChatKumpel" in memory
+
+
+def test_user_memory_touch_updates_display_name(tmp_path) -> None:
+    store = UserMemoryStore(str(tmp_path))
+
+    store.touch("99", "AlterName")
+    store.touch("99", "NeuerName")
+    memory = store.load("99", "NeuerName")
+
+    assert "Anzeigename zuletzt gesehen: NeuerName" in memory
+    assert "AlterName" not in memory
+
+
+def test_user_memory_touch_sanitizes_display_name(tmp_path) -> None:
+    store = UserMemoryStore(str(tmp_path))
+
+    store.touch("99", "Chat\nKumpel\tXD")
+    memory = store.load("99", "ChatKumpel")
+
+    assert "Anzeigename zuletzt gesehen: Chat Kumpel XD" in memory
+    assert "Chat\nKumpel" not in memory
+
+
+def test_event_message_creates_memory_for_seen_chatter(
+    bot: PandaBot, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "user_memory_enabled", True)
+    bot.user_memory = UserMemoryStore(str(tmp_path))
+    payload = SimpleNamespace(
+        chatter=SimpleNamespace(id="123", name="chatkumpel", display_name="ChatKumpel"),
+        text="hallo zusammen",
+    )
+
+    asyncio.run(bot.event_message(payload))
+
+    memory = (tmp_path / "123.md").read_text(encoding="utf-8")
+    assert "Twitch-User-ID: 123" in memory
+    assert "Anzeigename zuletzt gesehen: ChatKumpel" in memory
 
 
 def test_user_memory_language_profile_tracks_dominant_language(tmp_path) -> None:
