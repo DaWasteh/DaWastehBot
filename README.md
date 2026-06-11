@@ -9,7 +9,7 @@ für Unterhaltung.
 ## Was kann der Bot?
 
 - **Mitlesen & antworten:** Reagiert, wenn jemand den Bot beim Namen nennt – sowohl beim echten Account-Namen (z. B. `@dawastehbot`) als auch bei einem optionalen Spitznamen aus `TWITCH_BOT_NAME`.
-- **Chatverlauf als Kontext:** Die letzten Nachrichten fließen in jede Antwort ein, damit der Bot dem Gespräch folgt.
+- **Chatverlauf als echtes Gespräch:** Die letzten Nachrichten (inklusive der eigenen Antworten) gehen als richtige user/assistant-Turns ans Modell - nicht als Text-Blob. Das hält den Bot im Gesprächsfluss und verhindert, dass Modelle Prompt-Bausteine in den Chat zurückspiegeln.
 - **Live-Streamkontext:** Aktuelles Spiel und Stream-Titel werden automatisch über die Twitch-API geholt und in den Prompt eingebaut.
 - **Bei Stille aktiv:** Ist der Chat eine Weile ruhig (und der Stream live), wirft der Bot von selbst einen Gesprächsaufhänger ein.
 - **`!panda <frage>`-Befehl:** Direkter Draht zum Bot.
@@ -139,6 +139,20 @@ Wichtig: Die API-Modell-ID heißt `gemma-4-31b-it`, auch wenn sie über die Gemi
 Der Online-Modus nutzt den OpenAI-kompatiblen Gemini-Endpunkt und schaltet
 llama.cpp-spezifische Felder wie `repeat_penalty` automatisch ab. Wenn du VRAM freihalten willst, setze einfach `LLM_BACKEND=online`.
 
+**Gemma-Besonderheiten, die PandaBot automatisch behandelt:**
+
+- Gemma kennt keine echte System-Rolle. Im Online-Profil bettet PandaBot die
+  Anweisungen deshalb in die erste User-Nachricht ein (`LLM_USE_SYSTEM_ROLE`
+  steht online automatisch auf `false`, lokal bleibt es bei `true`).
+- Gemma verlangt strikt abwechselnde user/assistant-Turns. PandaBot legt
+  aufeinanderfolgende Chatter-Nachrichten zusammen und sorgt dafür, dass die
+  Konversation mit einer User-Nachricht beginnt.
+- Gemma schreibt gern interne `<thought>`-Notizen vor der Antwort. PandaBot
+  filtert sie heraus; `GOOGLE_LLM_MAX_TOKENS` ist dafür etwas großzügiger
+  voreingestellt, damit nach den Gedanken noch echte Antwort übrig bleibt.
+- Der Stream-Titel wird vor jedem Prompt von Tags, Emotes und `!commands`
+  bereinigt, damit das Modell ihn nicht wörtlich in den Chat kopiert.
+
 ## Lokalen LLM-Server starten
 
 Beispielhaft mit `llama-server` aus llama.cpp (Port an deine `.env` anpassen):
@@ -190,13 +204,14 @@ Ist ein LLM-Backend ausgewählt/erreichbar und der Bot gestartet, läuft alles a
 | `LLM_REPEAT_PENALTY` | `1.15` | Strafe gegen Wiederholungen (llama.cpp) |
 | `LLM_SEND_REPEAT_PENALTY` | `true` | `repeat_penalty` mitschicken? Online wird automatisch deaktiviert |
 | `LLM_SEND_LLAMA_EXTRAS` | `true` | llama.cpp-Thinking-Extras mitschicken? Online wird automatisch deaktiviert |
+| `LLM_USE_SYSTEM_ROLE` | `true` | Anweisungen als System-Rolle senden? Online (Gemma) automatisch `false`; dann landen sie in der ersten User-Nachricht |
 | `LLM_MAX_TOKENS` | `80` | Maximale Antwortlänge lokal |
 | `LLM_TIMEOUT` | `20` | Sekunden, bis ein lokaler LLM-Aufruf abbricht |
 | `GOOGLE_API_KEY` | leer | API-Key für Google AI Studio / Gemini API |
 | `GOOGLE_LLM_MODEL` | `gemma-4-31b-it` | Online-Modell |
-| `GOOGLE_LLM_MAX_TOKENS` | `120` | Maximale Antwortlänge online |
+| `GOOGLE_LLM_MAX_TOKENS` | `200` | Maximale Antwortlänge online (inkl. Puffer für gefilterte `<thought>`-Blöcke) |
 | `GOOGLE_LLM_TIMEOUT` | `30` | Timeout für Online-Aufrufe |
-| `HISTORY_LENGTH` | `12` | Wie viele Chat-Zeilen als Kontext dienen |
+| `HISTORY_LENGTH` | `16` | Wie viele Verlaufs-Turns als Kontext dienen (inkl. eigener Bot-Antworten) |
 | `IDLE_THRESHOLD` | `900` | Sekunden Stille bis zur Eigeninitiative |
 | `IDLE_MAX_SOLO_MESSAGES` | `1` | Max. eigene Idle-Nachrichten ohne neue echte Chat-Nachricht (`0` deaktiviert Idle) |
 | `CONTEXT_TTL` | `120` | Cache-Dauer für Titel/Spiel in Sekunden |
@@ -212,6 +227,7 @@ dürfen **niemals** committet werden – sie enthalten deine Secrets bzw. Tokens
 - **Bot startet, sagt aber nichts:** Bei `local`: Läuft der `llama-server` unter der `LLM_SERVER_URL`? Bei `online`: Ist `GOOGLE_API_KEY` gesetzt und gültig? Check die Logs auf „LLM-Backend nicht erreichbar".
 - **Keine Reaktion im Chat:** Wurde die Autorisierung für **beide** Accounts durchgeführt? Lösche notfalls `.tio.tokens.json` und wiederhole den OAuth-Schritt.
 - **Idle-Nachrichten kommen nicht:** Der Bot wird nur aktiv, wenn der Stream **live** ist.
+- **Bot gibt Streamtitel, Labels oder Prompt-Schnipsel aus (v. a. online/Gemma):** Sollte mit der aktuellen Version nicht mehr passieren - Titel werden bereinigt, Anweisungen liegen für Gemma in der ersten User-Nachricht. Falls du ein anderes OpenAI-kompatibles Backend nutzt, das System-Messages sauber kann, setze `LLM_USE_SYSTEM_ROLE=true`.
 
 ## Lizenz
 

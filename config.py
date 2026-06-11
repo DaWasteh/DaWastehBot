@@ -80,6 +80,13 @@ class Settings:
     llm_send_llama_extras: bool = field(
         default_factory=lambda: _env_bool("LLM_SEND_LLAMA_EXTRAS", True)
     )
+    # System-Rolle nutzen? Gemma-Modelle (lokal wie über die Gemini API) kennen
+    # keine echte System-Rolle bzw. ignorieren sie gern; dann bettet der Bot
+    # die Anweisungen automatisch in die erste User-Nachricht ein. Das
+    # Online-Profil schaltet das standardmäßig ab (per Env übersteuerbar).
+    llm_use_system_role: bool = field(
+        default_factory=lambda: _env_bool("LLM_USE_SYSTEM_ROLE", True)
+    )
     llm_max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "80")))
     llm_timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "20")))
 
@@ -94,7 +101,7 @@ class Settings:
         default_factory=lambda: os.getenv("GOOGLE_LLM_MODEL", "gemma-4-31b-it")
     )
     google_llm_max_tokens: int = field(
-        default_factory=lambda: int(os.getenv("GOOGLE_LLM_MAX_TOKENS", "120"))
+        default_factory=lambda: int(os.getenv("GOOGLE_LLM_MAX_TOKENS", "200"))
     )
     google_llm_timeout: float = field(
         default_factory=lambda: float(os.getenv("GOOGLE_LLM_TIMEOUT", "30"))
@@ -104,7 +111,7 @@ class Settings:
     )
 
     # --- Verhalten ---
-    history_length: int = field(default_factory=lambda: int(os.getenv("HISTORY_LENGTH", "12")))
+    history_length: int = field(default_factory=lambda: int(os.getenv("HISTORY_LENGTH", "16")))
     idle_threshold: int = field(default_factory=lambda: int(os.getenv("IDLE_THRESHOLD", "900")))
     idle_max_solo_messages: int = field(
         default_factory=lambda: int(os.getenv("IDLE_MAX_SOLO_MESSAGES", "1"))
@@ -153,6 +160,10 @@ class Settings:
             self.llm_timeout = self.google_llm_timeout
             self.llm_send_repeat_penalty = False
             self.llm_send_llama_extras = False
+            # Gemma kennt keine System-Rolle: Anweisungen wandern in die erste
+            # User-Nachricht. Mit LLM_USE_SYSTEM_ROLE=true erzwingbar, falls das
+            # eigene Backend System-Messages doch sauber unterstützt.
+            self.llm_use_system_role = _env_bool("LLM_USE_SYSTEM_ROLE", False)
             return
 
         raise ValueError("LLM_BACKEND muss 'ask', 'local' oder 'online' sein.")

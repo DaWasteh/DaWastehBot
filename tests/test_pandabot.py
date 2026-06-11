@@ -21,7 +21,10 @@ from pandabot import (
     LANGUAGE_SWEDISH,
     LLMClient,
     PandaBot,
+    StreamContext,
     UserMemoryStore,
+    build_system_prompt,
+    clean_stream_title_parts,
     detect_message_language,
     language_reply_instruction,
 )
@@ -79,18 +82,150 @@ def test_sanitize_removes_complete_think_block(client: LLMClient) -> None:
     assert client._sanitize(raw) == "Servus, klar doch!"
 
 
+def test_sanitize_removes_gemma_thought_block(client: LLMClient) -> None:
+    raw = (
+        "<thought>* User: DaWasteh. * Input: photosynthese chemische formel. "
+        "* Constraints: No Markdown.</thought> Antwort: Photosynthese kurz: "
+        "6 CO₂ + 6 H₂O + Lichtenergie → C₆H₁₂O₆ + 6 O₂."
+    )
+
+    assert (
+        client._sanitize(raw)
+        == "Photosynthese kurz: 6 CO₂ + 6 H₂O + Lichtenergie → C₆H₁₂O₆ + 6 O₂."
+    )
+
+
 def test_sanitize_rescues_answer_after_unclosed_think(client: LLMClient) -> None:
     raw = "<think>Okay, der User fragt nach dem Chat. Antwort: Im Chat war gerade Bot-Testen angesagt."
 
     assert client._sanitize(raw) == "Im Chat war gerade Bot-Testen angesagt."
 
 
+def test_sanitize_rescues_answer_after_unclosed_gemma_thought(client: LLMClient) -> None:
+    raw = "<thought>Der User fragt nach Chemie. Antwort: Die Formel ist 6 CO₂ + 6 H₂O → C₆H₁₂O₆ + 6 O₂."
+
+    assert client._sanitize(raw) == "Die Formel ist 6 CO₂ + 6 H₂O → C₆H₁₂O₆ + 6 O₂."
+
+
 def test_sanitize_drops_unclosed_think_without_answer(client: LLMClient) -> None:
     assert client._sanitize("<think>Okay, der User fragt nach dem Prompt") is None
 
 
+def test_sanitize_drops_gemma_thought_only(client: LLMClient) -> None:
+    assert client._sanitize("<thought>* User: DaWasteh. * Input: test.</thought>") is None
+
+
+def test_sanitize_rescues_answer_when_gemma_wraps_everything_in_thought(client: LLMClient) -> None:
+    raw = (
+        "<thought>* User: DaWasteh (the streamer).\n"
+        "* Request: photosynthese chemische formel\n"
+        "* Constraints: No markdown, short and snappy.\n\n"
+        "6 CO₂ + 6 H₂O + Lichtenergie → C₆H₁₂O₆ + 6 O₂."
+        "</thought>"
+    )
+
+    assert client._sanitize(raw) == "6 CO₂ + 6 H₂O + Lichtenergie → C₆H₁₂O₆ + 6 O₂."
+
+
+def test_sanitize_rescues_answer_from_same_line_gemma_thought(client: LLMClient) -> None:
+    raw = (
+        "<thought>* User: DaWasteh. * Request: photosynthese chemische formel. "
+        "* 6 CO₂ + 6 H₂O + Lichtenergie → C₆H₁₂O₆ + 6 O₂.</thought>"
+    )
+
+    assert client._sanitize(raw) == "6 CO₂ + 6 H₂O + Lichtenergie → C₆H₁₂O₆ + 6 O₂."
+
+
+def test_sanitize_drops_truncated_gemma_thought_without_complete_answer(client: LLMClient) -> None:
+    raw = "<thought>* User: DaWasteh. * Request: photosynthese chemische formel. * 6 CO2 + 6 H"
+
+    assert client._sanitize(raw) is None
+
+
+def test_fallback_answers_photosynthesis_formula(bot: PandaBot) -> None:
+    assert (
+        bot._fallback_reply("!panda photosynthese chemische formel")
+        == "6 CO₂ + 6 H₂O + Lichtenergie → C₆H₁₂O₆ + 6 O₂."
+    )
+
+
+def test_fallback_answers_decarboxylation_formula(bot: PandaBot) -> None:
+    assert (
+        bot._fallback_reply("!panda chemische formel für decarboxilierung")
+        == "Allgemein: R-COOH → R-H + CO₂. Kurz: Carboxylgruppe ab, CO₂ raus."
+    )
+
+
+def test_fallback_answers_keto_enol_formula(bot: PandaBot) -> None:
+    assert (
+        bot._fallback_reply("!panda chemische formel für keto-enol-tautomerie")
+        == "Keto-Enol-Tautomerie: R-CO-CH₂-R′ ⇌ R-C(OH)=CH-R′. Das ist Ketoform ↔ Enolform."
+    )
+
+
+def test_fallback_answers_mtp_llm_as_mcp(bot: PandaBot) -> None:
+    assert (
+        bot._fallback_reply("!panda erklär mir MTP in bezug auf LLM's")
+        == "Meinst du MCP? Das ist wie ein USB-C-Port für LLMs: Tools, Dateien oder APIs werden standardisiert ans Modell angedockt."
+    )
+
+
+def test_fallback_answers_comfyui_video_question(bot: PandaBot) -> None:
+    assert (
+        bot._fallback_reply("!panda wie macht man in ComfyUI am besten Videos??")
+        == "In ComfyUI am besten mit AnimateDiff oder WAN/I2V starten: kurze Clips, feste Seed/Resolution, dann upscalen/interpolieren. Erst Workflow stabil kriegen, dann Qualität hochdrehen."
+    )
+
+
+def test_fallback_answers_anthropic_fable_opinion(bot: PandaBot) -> None:
+    assert (
+        bot._fallback_reply("was is deine meinung zu anthropic fable 5")
+        == "Fable 5 klingt spannend, vor allem wenn Anthropic bei Coding und Agenten nochmal nachlegt. Aber ich würd’s erst nach echten Benchmarks hypen – Marketing kann jeder."
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Response Language: Deutsch/Bayrisch (informal, casual).",
+        "Requested language: Deutsch/Bayrisch (informal/loose).",
+        'Current Query: "wie macht man in ComfyUI am besten Videos??" (How to best make videos in ComfyUI??).',
+        'Current Prompt: "@dawastehbot um was gehts heute?" (What\'s it about today?).',
+        'Query: "was passiert heute so" (What\'s happening today?).',
+        "Persona: dawastehbot (friendly, witty, conversational, chat buddy, slightly cheeky).",
+        "Stil: natürlich, direkt und conversational.",
+    ],
+)
+def test_sanitize_blocks_prompt_metadata(client: LLMClient, raw: str) -> None:
+    sanitized = client._sanitize(raw)
+
+    assert sanitized is not None
+    assert client._looks_like_reasoning(sanitized) is True
+
+
 def test_reasoning_detector_catches_meta_text(client: LLMClient) -> None:
     assert client._looks_like_reasoning("Okay, der User fragt nach dem Streamtitel.") is True
+    assert (
+        client._looks_like_reasoning("Response Language: Deutsch/Bayrisch (informal, casual).")
+        is True
+    )
+    assert (
+        client._looks_like_reasoning(
+            'Current Query: "wie macht man in ComfyUI am besten Videos??" (How to best make videos in ComfyUI??).'
+        )
+        is True
+    )
+    assert (
+        client._looks_like_reasoning('Query: "was passiert heute so" (What\'s happening today?).')
+        is True
+    )
+    assert (
+        client._looks_like_reasoning(
+            "Persona: dawastehbot (friendly, witty, natural, conversational, chat buddy)."
+        )
+        is True
+    )
+    assert client._looks_like_reasoning("ComfyUI | 🥦 420 🥦 | !panda !lurk !git !dc'.") is True
     assert client._looks_like_reasoning("Klar, ich helf dir kurz.") is False
 
 
@@ -166,8 +301,195 @@ def test_detect_message_language(message: str, expected: str) -> None:
 def test_language_instruction_current_message_overrides_memory_language() -> None:
     instruction = language_reply_instruction(LANGUAGE_ENGLISH, LANGUAGE_DEFAULT)
 
-    assert "Reply to this message in natural English only" in instruction
+    assert "Write the chat reply in natural English only" in instruction
     assert "darf die aktuelle Antwortsprache NICHT überschreiben" in instruction
+
+
+def test_complete_reply_retries_after_empty_or_metadata_reply(bot: PandaBot) -> None:
+    class StubLLM:
+        def __init__(self) -> None:
+            self.calls: list[list[tuple[str, str]]] = []
+
+        async def complete(
+            self, _system_prompt: str, turns: list[tuple[str, str]], **_kwargs: object
+        ) -> str | None:
+            self.calls.append(list(turns))
+            if len(self.calls) == 1:
+                return None
+            return "Allgemein: R-COOH → R-H + CO₂."
+
+    stub = StubLLM()
+    bot.llm = stub  # type: ignore[assignment]
+
+    reply = asyncio.run(
+        bot._complete_reply("system", [("user", "DaWasteh: chemie frage")], LANGUAGE_DEFAULT)
+    )
+
+    assert reply == "Allgemein: R-COOH → R-H + CO₂."
+    assert len(stub.calls) == 2
+    # Der Retry hängt nur einen weiteren User-Turn an - ohne Beispiel-Labels,
+    # die das Modell sonst lernen und zurückspiegeln könnte.
+    retry_role, retry_content = stub.calls[1][-1]
+    assert retry_role == "user"
+    assert "leer" in retry_content
+    assert "Persona" not in retry_content
+
+
+def test_stream_context_question_handles_bot_mention_and_today(bot: PandaBot) -> None:
+    assert bot._is_stream_context_question("@dawastehbot um was gehts heute?") is True
+    assert bot._is_stream_context_question("!panda was passiert heute so") is True
+    assert bot._is_stream_context_question("was passiert heute so") is True
+
+
+def test_stream_context_answer_keeps_real_title_but_drops_commands(bot: PandaBot) -> None:
+    bot.context.game = "Software and Game Development"
+    bot.context.title = "[BY/GER/EN] | I Need You ! - ComfyUI | 🥦 420 🥦 | !panda !lurk !git !dc"
+
+    reply = bot._stream_context_answer(LANGUAGE_DEFAULT)
+
+    assert "I Need You - ComfyUI" in reply
+    assert "!panda" not in reply
+    assert "420" not in reply
+
+
+def test_stream_title_leak_is_blocked_and_comfyui_fallback_answers(bot: PandaBot) -> None:
+    assert bot.llm._looks_like_reasoning("ComfyUI | 🥦 420 🥦 | !panda !lurk !git !dc'.") is True
+    assert (
+        bot._fallback_reply("!panda wie macht man in ComfyUI am besten Videos??")
+        == "In ComfyUI am besten mit AnimateDiff oder WAN/I2V starten: kurze Clips, feste Seed/Resolution, dann upscalen/interpolieren. Erst Workflow stabil kriegen, dann Qualität hochdrehen."
+    )
+
+
+@pytest.mark.parametrize(
+    "leak",
+    [
+        "ComfyUI | 🥦 420 🥦 | !panda !lurk !git !dc'.",
+        'Current Query: "wie macht man in ComfyUI am besten Videos??" (How to best make videos in ComfyUI??).',
+        'Query: "wie macht man in ComfyUI am besten Videos??" (How to best make videos in ComfyUI??).',
+    ],
+)
+def test_respond_replaces_llm_leak_with_comfyui_fallback(
+    bot: PandaBot, tmp_path, monkeypatch: pytest.MonkeyPatch, leak: str
+) -> None:
+    class StubLLM:
+        def __init__(self, response: str) -> None:
+            self.response = response
+            self.guard = LLMClient()
+
+        async def complete(self, *_args: object, **_kwargs: object) -> str:
+            return self.response
+
+        def _looks_like_reasoning(self, text: str) -> bool:
+            return self.guard._looks_like_reasoning(text)
+
+    class Payload:
+        chatter = SimpleNamespace(id="166166593", name="dawasteh", display_name="DaWasteh")
+        text = "!panda wie macht man in ComfyUI am besten Videos??"
+
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def respond(self, text: str) -> None:
+            self.sent.append(text)
+
+    monkeypatch.setattr(settings, "user_memory_enabled", False)
+    bot.user_memory = UserMemoryStore(str(tmp_path))
+    bot.llm = StubLLM(leak)  # type: ignore[assignment]
+    payload = Payload()
+
+    asyncio.run(
+        bot._respond(
+            payload, author="DaWasteh", trigger="!panda wie macht man in ComfyUI am besten Videos??"
+        )
+    )
+
+    assert payload.sent == [
+        "In ComfyUI am besten mit AnimateDiff oder WAN/I2V starten: kurze Clips, feste Seed/Resolution, dann upscalen/interpolieren. Erst Workflow stabil kriegen, dann Qualität hochdrehen."
+    ]
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        "@dawastehbot um was gehts heute?",
+        "!panda was passiert heute so",
+        "was passiert heute so",
+    ],
+)
+def test_respond_stream_context_question_bypasses_llm_and_answers_context(
+    bot: PandaBot, tmp_path, monkeypatch: pytest.MonkeyPatch, trigger: str
+) -> None:
+    class FailingLLM:
+        def _looks_like_reasoning(self, _text: str) -> bool:
+            return False
+
+        async def complete(self, *_args: object, **_kwargs: object) -> str:
+            raise AssertionError("LLM must not be called for stream-context questions")
+
+    class Payload:
+        chatter = SimpleNamespace(id="166166593", name="dawasteh", display_name="DaWasteh")
+
+        def __init__(self, text: str) -> None:
+            self.text = text
+            self.sent: list[str] = []
+
+        async def respond(self, text: str) -> None:
+            self.sent.append(text)
+
+    monkeypatch.setattr(settings, "user_memory_enabled", False)
+    bot.user_memory = UserMemoryStore(str(tmp_path))
+    bot.context.game = "Software and Game Development"
+    bot.context.title = "[BY/GER/EN] | I Need You ! - ComfyUI | 🥦 420 🥦 | !panda !lurk !git !dc"
+    bot.llm = FailingLLM()  # type: ignore[assignment]
+    payload = Payload(trigger)
+
+    asyncio.run(bot._respond(payload, author="DaWasteh", trigger=trigger))
+
+    assert payload.sent == [
+        "Grob geht’s um Software and Game Development; heute offenbar mit Fokus auf I Need You - ComfyUI."
+    ]
+
+
+def test_respond_uses_opinion_fallback_when_gemma_returns_only_thoughts(
+    bot: PandaBot, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class ThoughtOnlyLLM:
+        def __init__(self) -> None:
+            self.guard = LLMClient()
+            self.calls = 0
+
+        async def complete(self, *_args: object, **_kwargs: object) -> None:
+            self.calls += 1
+            return None
+
+        def _looks_like_reasoning(self, text: str) -> bool:
+            return self.guard._looks_like_reasoning(text)
+
+    class Payload:
+        chatter = SimpleNamespace(id="166166593", name="dawasteh", display_name="DaWasteh")
+        text = "!panda was is deine meinung zu anthropic fable 5"
+
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def respond(self, text: str) -> None:
+            self.sent.append(text)
+
+    monkeypatch.setattr(settings, "user_memory_enabled", False)
+    bot.user_memory = UserMemoryStore(str(tmp_path))
+    bot.llm = ThoughtOnlyLLM()  # type: ignore[assignment]
+    payload = Payload()
+
+    asyncio.run(
+        bot._respond(
+            payload, author="DaWasteh", trigger="was is deine meinung zu anthropic fable 5"
+        )
+    )
+
+    assert payload.sent == [
+        "Fable 5 klingt spannend, vor allem wenn Anthropic bei Coding und Agenten nochmal nachlegt. Aber ich würd’s erst nach echten Benchmarks hypen – Marketing kann jeder."
+    ]
+    assert bot.llm.calls == 2
 
 
 def test_apply_online_llm_backend_uses_google_profile(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,7 +511,8 @@ def test_apply_online_llm_backend_uses_google_profile(monkeypatch: pytest.Monkey
     assert settings_obj.llm_api_key == "test-key"
     assert settings_obj.llm_send_repeat_penalty is False
     assert settings_obj.llm_send_llama_extras is False
-    assert settings_obj.llm_max_tokens == 120
+    assert settings_obj.llm_use_system_role is False
+    assert settings_obj.llm_max_tokens == 200
     assert settings_obj.llm_timeout == 30
 
 
@@ -271,3 +594,131 @@ def test_user_memory_language_profile_tracks_dominant_language(tmp_path) -> None
     assert store.dominant_language(memory) == LANGUAGE_DEFAULT
     assert "Deutsch/Bayrisch=2" in memory
     assert "English=1" in memory
+
+
+def test_clean_stream_title_parts_drops_tags_commands_and_deko() -> None:
+    parts = clean_stream_title_parts(
+        "[BY/GER/EN] | I Need You ! - ComfyUI | 🥦 420 🥦 | !panda !lurk !git !dc"
+    )
+
+    assert parts == ["I Need You - ComfyUI"]
+
+
+def test_build_system_prompt_uses_cleaned_title() -> None:
+    ctx = StreamContext()
+    ctx.game = "Software and Game Development"
+    ctx.title = "[BY/GER/EN] | ComfyUI Deep Dive | 🥦 420 🥦 | !panda !lurk"
+
+    prompt = build_system_prompt(ctx)
+
+    assert "ComfyUI Deep Dive" in prompt
+    assert "!panda" not in prompt
+    assert "[BY/GER/EN]" not in prompt
+    assert "420" not in prompt
+
+
+def test_build_system_prompt_skips_unknown_title() -> None:
+    ctx = StreamContext()
+    ctx.game = "Just Chatting"
+    ctx.title = "Unbekannt"
+
+    prompt = build_system_prompt(ctx)
+
+    assert "Just Chatting" in prompt
+    assert "Unbekannt" not in prompt
+
+
+def test_build_messages_merges_system_into_first_user_turn_without_system_role(
+    client: LLMClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gemma & Co. ohne System-Rolle: Anweisungen landen in der ersten User-Nachricht."""
+    monkeypatch.setattr(settings, "llm_use_system_role", False)
+    monkeypatch.setattr(settings, "llm_send_llama_extras", False)
+
+    messages = client._build_messages(
+        "SYSTEM-ANWEISUNGEN",
+        [
+            ("user", "Alice: hi"),
+            ("user", "Bob: yo"),
+            ("assistant", "Servus ihr zwei!"),
+            ("user", "Alice: PandaBot erzähl was"),
+        ],
+        final_label="Antwort",
+        allow_prefill=True,
+    )
+
+    assert [message["role"] for message in messages] == ["user", "assistant", "user"]
+    assert messages[0]["content"].startswith("SYSTEM-ANWEISUNGEN")
+    # Aufeinanderfolgende User-Nachrichten werden zusammengelegt (strikte
+    # Templates wie Gemma verlangen abwechselnde Rollen).
+    assert "Alice: hi\nBob: yo" in messages[0]["content"]
+    assert messages[-1] == {"role": "user", "content": "Alice: PandaBot erzähl was"}
+
+
+def test_build_messages_keeps_system_role_and_folds_leading_bot_turns(
+    client: LLMClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "llm_use_system_role", True)
+    monkeypatch.setattr(settings, "llm_send_llama_extras", False)
+
+    messages = client._build_messages(
+        "SYSTEM",
+        [("assistant", "Ich bin wach!"), ("user", "Alice: hi")],
+        final_label="Antwort",
+        allow_prefill=True,
+    )
+
+    assert [message["role"] for message in messages] == ["system", "user"]
+    assert "Ich bin wach!" in messages[0]["content"]
+    assert messages[1]["content"] == "Alice: hi"
+
+
+def test_build_messages_adds_prefill_only_for_llama_extras(
+    client: LLMClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "llm_use_system_role", True)
+    monkeypatch.setattr(settings, "llm_send_llama_extras", True)
+
+    messages = client._build_messages(
+        "SYS", [("user", "Alice: hi")], final_label="Antwort", allow_prefill=True
+    )
+
+    assert messages[-1] == {"role": "assistant", "content": "<think></think>\nAntwort:"}
+
+    no_prefill = client._build_messages(
+        "SYS", [("user", "Alice: hi")], final_label="Antwort", allow_prefill=False
+    )
+
+    assert no_prefill[-1]["role"] == "user"
+
+
+def test_remember_bot_message_dedupes_eventsub_echo(bot: PandaBot) -> None:
+    bot._remember_bot_message("Servus Chat!")
+    bot._remember_bot_message("Servus Chat!")  # EventSub-Echo der eigenen Nachricht
+
+    assert list(bot.chat_history) == [("assistant", "Servus Chat!")]
+    assert list(bot._recent_bot_messages) == ["Servus Chat!"]
+
+
+def test_event_message_appends_user_turn_to_history(
+    bot: PandaBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "user_memory_enabled", False)
+    payload = SimpleNamespace(
+        chatter=SimpleNamespace(id="123", name="chatkumpel", display_name="ChatKumpel"),
+        text="hallo zusammen",
+    )
+
+    asyncio.run(bot.event_message(payload))
+
+    assert list(bot.chat_history) == [("user", "ChatKumpel: hallo zusammen")]
+
+
+def test_history_turns_excludes_current_user_message(bot: PandaBot) -> None:
+    bot.chat_history.append(("user", "Alice: hi"))
+    bot.chat_history.append(("assistant", "Servus Alice!"))
+    bot.chat_history.append(("user", "Alice: PandaBot erzähl was"))
+
+    turns = bot._history_turns(limit=10, current=("user", "Alice: PandaBot erzähl was"))
+
+    assert turns == [("user", "Alice: hi"), ("assistant", "Servus Alice!")]
