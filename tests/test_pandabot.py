@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import pytest
+
+if TYPE_CHECKING:
+    import twitchio
 
 from config import Settings, settings
 from pandabot import (
@@ -28,6 +32,11 @@ from pandabot import (
     detect_message_language,
     language_reply_instruction,
 )
+
+
+def _chat_message(payload: object) -> twitchio.ChatMessage:
+    """Castet duck-typed Test-Payloads für mypy zu TwitchIO-ChatMessage."""
+    return cast("twitchio.ChatMessage", payload)
 
 
 @pytest.fixture
@@ -264,7 +273,7 @@ def test_is_own_message_detects_bot_by_login(bot: PandaBot) -> None:
         text="PandaBot fragt sich selbst was",
     )
 
-    assert bot._is_own_message(payload) is True
+    assert bot._is_own_message(_chat_message(payload)) is True
 
 
 def test_is_own_message_does_not_treat_mentions_as_self(bot: PandaBot) -> None:
@@ -273,7 +282,7 @@ def test_is_own_message_does_not_treat_mentions_as_self(bot: PandaBot) -> None:
         text="@dawastehbot bist du da?",
     )
 
-    assert bot._is_own_message(payload) is False
+    assert bot._is_own_message(_chat_message(payload)) is False
 
 
 def test_recent_bot_repeat_detection(bot: PandaBot) -> None:
@@ -399,7 +408,9 @@ def test_respond_replaces_llm_leak_with_comfyui_fallback(
 
     asyncio.run(
         bot._respond(
-            payload, author="DaWasteh", trigger="!panda wie macht man in ComfyUI am besten Videos??"
+            _chat_message(payload),
+            author="DaWasteh",
+            trigger="!panda wie macht man in ComfyUI am besten Videos??",
         )
     )
 
@@ -443,7 +454,7 @@ def test_respond_stream_context_question_bypasses_llm_and_answers_context(
     bot.llm = FailingLLM()  # type: ignore[assignment]
     payload = Payload(trigger)
 
-    asyncio.run(bot._respond(payload, author="DaWasteh", trigger=trigger))
+    asyncio.run(bot._respond(_chat_message(payload), author="DaWasteh", trigger=trigger))
 
     assert payload.sent == [
         "Grob geht’s um Software and Game Development; heute offenbar mit Fokus auf I Need You - ComfyUI."
@@ -477,19 +488,22 @@ def test_respond_uses_opinion_fallback_when_gemma_returns_only_thoughts(
 
     monkeypatch.setattr(settings, "user_memory_enabled", False)
     bot.user_memory = UserMemoryStore(str(tmp_path))
-    bot.llm = ThoughtOnlyLLM()  # type: ignore[assignment]
+    llm = ThoughtOnlyLLM()
+    bot.llm = llm  # type: ignore[assignment]
     payload = Payload()
 
     asyncio.run(
         bot._respond(
-            payload, author="DaWasteh", trigger="was is deine meinung zu anthropic fable 5"
+            _chat_message(payload),
+            author="DaWasteh",
+            trigger="was is deine meinung zu anthropic fable 5",
         )
     )
 
     assert payload.sent == [
         "Fable 5 klingt spannend, vor allem wenn Anthropic bei Coding und Agenten nochmal nachlegt. Aber ich würd’s erst nach echten Benchmarks hypen – Marketing kann jeder."
     ]
-    assert bot.llm.calls == 2
+    assert llm.calls == 2
 
 
 def test_apply_online_llm_backend_uses_google_profile(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -576,7 +590,7 @@ def test_event_message_creates_memory_for_seen_chatter(
         text="hallo zusammen",
     )
 
-    asyncio.run(bot.event_message(payload))
+    asyncio.run(bot.event_message(_chat_message(payload)))
 
     memory = (tmp_path / "123.md").read_text(encoding="utf-8")
     assert "Twitch-User-ID: 123" in memory
@@ -709,7 +723,7 @@ def test_event_message_appends_user_turn_to_history(
         text="hallo zusammen",
     )
 
-    asyncio.run(bot.event_message(payload))
+    asyncio.run(bot.event_message(_chat_message(payload)))
 
     assert list(bot.chat_history) == [("user", "ChatKumpel: hallo zusammen")]
 
