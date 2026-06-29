@@ -11,9 +11,9 @@ Getestet mit TwitchIO 3.2.2 / Python 3.11+.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import getpass
 import logging
+import random
 import re
 import sys
 import time
@@ -27,7 +27,7 @@ from urllib.parse import quote
 import aiohttp
 import twitchio
 from twitchio import eventsub
-from twitchio.ext import commands, routines
+from twitchio.ext import commands
 
 from config import settings
 
@@ -809,7 +809,8 @@ class UserMemoryStore:
         return (
             f"# User-Gedächtnis: {display_name}\n\n"
             f"- Twitch-User-ID: {user_id}\n"
-            f"- Anzeigename zuletzt gesehen: {display_name}\n\n"
+            f"- Anzeigename zuletzt gesehen: {display_name}\n"
+            "- Interaktionen: 0\n\n"
             "## Notizen\n"
         )
 
@@ -822,6 +823,127 @@ class UserMemoryStore:
         except OSError:
             LOGGER.exception("Konnte User-Gedächtnis nicht lesen: %s", path)
             return "(Gedächtnis gerade nicht lesbar)"
+
+    def interaction_count(self, memory_text: str) -> int:
+        match = re.search(r"(?m)^- Interaktionen:\s*(\d+)\s*$", memory_text)
+        return int(match.group(1)) if match else 0
+
+    def record_interaction(self, user_id: str, display_name: str) -> int:
+        """Zählt eine echte Interaktion hoch und gibt den neuen Zählerstand zurück."""
+        display_name = self._clean_display_name(display_name, user_id)
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self._path(user_id)
+        try:
+            current = (
+                path.read_text(encoding="utf-8")
+                if path.exists()
+                else self._initial_content(user_id, display_name)
+            )
+        except OSError:
+            LOGGER.exception("Konnte User-Gedächtnis nicht für Interaktion lesen: %s", path)
+            return 0
+
+        count = self.interaction_count(current) + 1
+        if re.search(r"(?m)^- Interaktionen:\s*\d+\s*$", current):
+            updated = re.sub(
+                r"(?m)^- Interaktionen:\s*\d+\s*$",
+                f"- Interaktionen: {count}",
+                current,
+                count=1,
+            )
+        else:
+            anchor = f"- Twitch-User-ID: {user_id}\n"
+            marker = f"- Anzeigename zuletzt gesehen: {display_name}\n"
+            if marker in current:
+                updated = current.replace(marker, f"{marker}- Interaktionen: {count}\n", 1)
+            elif anchor in current:
+                updated = current.replace(anchor, f"{anchor}- Interaktionen: {count}\n", 1)
+            else:
+                updated = current.replace("\n## Notizen\n", f"\n- Interaktionen: {count}\n\n## Notizen\n", 1)
+        try:
+            path.write_text(updated, encoding="utf-8")
+        except OSError:
+            LOGGER.exception("Konnte Interaktionszähler nicht speichern: %s", path)
+        return count
+
+    def should_summarize(self, count: int) -> bool:
+        """True, wenn bei diesem Zählerstand eine Profil-Consolidation fällig ist."""
+        after = settings.profile_summary_after
+        if after <= 0:
+            return False
+        if count == after:
+            return True
+        interval = settings.profile_summary_interval
+        return interval > 0 and count > after and (count - after) % interval == 0
+
+    def rewrite_notes(self, user_id: str, display_name: str, notes: str) -> None:
+        """Ersetzt die '## Notizen'-Sektion komplett durch die konsolidierte Fassung.
+
+        Im Gegensatz zu ``append`` (das nur ergänzt und deduppt) wird hier die
+        ganze Sektion neu geschrieben - das hält reichhaltige Profile schlank und
+        verhindert, dass sich veraltete/ähnliche Notizen über Monaten stapeln.
+        """
+        cleaned_notes = self._clean_consolidated_notes(notes)
+        if not cleaned_notes:
+            return
+        display_name = self._clean_display_name(display_name, user_id)
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self._path(user_id)
+        try:
+            current = (
+                path.read_text(encoding="utf-8")
+                if path.exists()
+                else self._initial_content(user_id, display_name)
+            )
+        except OSError:
+            LOGGER.exception("Konnte User-Gedächtnis für Consolidation nicht lesen: %s", path)
+            return
+
+        section = "## Notizen\n" + cleaned_notes + "\n"
+        if re.search(r"(?ms)^## Notizen\n.*?(?=\n## |\Z)", current):
+            updated = re.sub(
+                r"(?ms)^## Notizen\n.*?(?=\n## |\Z)",
+                section.rstrip(),
+                current,
+                count=1,
+            )
+        else:
+            updated = current.rstrip() + "\n\n" + section
+        try:
+            path.write_text(updated, encoding="utf-8")
+            LOGGER.info("User-Profil konsolidiert: %s", path)
+        except OSError:
+            LOGGER.exception("Konnte konsolidiertes Profil nicht speichern: %s", path)
+
+    def _clean_consolidated_notes(self, notes: str) -> str:
+        """Bereinigt die LLM-Consolidation-Ausgabe zu sauberen Markdown-Bullets."""
+        lines: list[str] = []
+        for raw in notes.splitlines():
+            line = re.sub(r"\s+", " ", raw.strip())
+            if not line:
+                continue
+            lowered = line.lower().strip("- *•")
+            if lowered in {"keine", "keine.", "keine neuen notizen.", "none", "n/a"}:
+                continue
+            line = re.sub(r"^(?:[-*•]\s*)?", "- ", line)
+            if len(line) > 260:
+                line = line[:259].rstrip() + "…"
+            lines.append(line)
+        # Doppelte / fast identische Notizen entfernen.
+        deduped: list[str] = []
+        seen: list[str] = []
+        for line in lines[: settings.profile_max_notes]:
+            norm = re.sub(r"[^\w]+", " ", line.lower()).strip()
+            if not norm:
+                continue
+            if any(
+                norm == prev or SequenceMatcher(None, norm, prev).ratio() >= 0.9
+                for prev in seen
+            ):
+                continue
+            seen.append(norm)
+            deduped.append(line)
+        return "\n".join(deduped)
 
     def touch(self, user_id: str, display_name: str) -> None:
         """Legt ein Gedächtnis für gesehene Chatter an und aktualisiert den Namen."""
@@ -1048,6 +1170,9 @@ def build_system_prompt(ctx: StreamContext) -> str:
         "Sprich die Person, die dich gerade anspricht, direkt mit 'du' an; rede nicht in der dritten Person über sie. "
         "Klinge wie ein aufmerksamer Chat-Kumpel: konkret, warm, gerne etwas frech, aber nicht generisch oder anbiedernd. "
         "Wenn du etwas nicht sicher weißt, sag es kurz ehrlich statt zu halluzinieren. "
+        "LURKER-REGEL (sehr wichtig): Sprich niemals Lurker an oder aus. Kein 'ihr Lurker da draußen', kein 'ich sehe euch zuschauen', "
+        "kein Erwähnen von Zuschauerzahlen, kein Outen oder Beaufwaltigen von Leuten, die nur mitlesen. Behandle Stille einfach als Chance, "
+        "ein neues Topic oder eine Frage in den Raum zu stellen - ohne jemanden beim Lurken zu erwischen. "
         "Kein steifer Assistententon, keine Meta-Sätze, keine Analyse, keine <think>- oder <thought>-Blöcke, keine Labels oder Feldnamen, kein Wiederholen der Frage, kein Markdown/Fettdruck. "
         "Zitiere den Streamtitel nie wörtlich und kopiere keine Chat-Commands (!...), Emotes oder Deko. "
         "Emojis sparsam verwenden. Sei locker und unterhaltsam, aber nie beleidigend. "
@@ -1085,10 +1210,21 @@ class PandaBot(commands.Bot):
 
         self._last_activity = time.monotonic()
         self._idle_messages_since_human = 0
-        self._recent_bot_messages: deque[str] = deque(maxlen=6)
+        self._recent_bot_messages: deque[str] = deque(maxlen=8)
+        # Letzte verwendeten Gesprächsaufhänger (Opener), damit sich Idle-Starts
+        # nicht ähneln - neben dem reinen Textvergleich ein zusätzlicher Schutz.
+        self._recent_openers: deque[str] = deque(maxlen=8)
         self._chat_subscription_active = False
         # Lock statt bool-Flag: verhindert sauber parallele LLM-Aufrufe.
         self._llm_lock = asyncio.Lock()
+
+        # Per-User-Puffer der letzten (User-Nachricht, Bot-Antwort)-Paare für
+        # die reichhaltige Profil-Consolidation. None = keine Bot-Antwort.
+        self._user_interactions: dict[str, deque[tuple[str, str | None]]] = {}
+        # Verhindert, dass für denselben User parallel consolidiert wird.
+        self._summarizing: set[str] = set()
+        # Ereignisgesteuerter Idle-Task (statt starrer 60s-Routine).
+        self._idle_task: asyncio.Task[None] | None = None
 
     # ----- Setup & EventSub -------------------------------------------------- #
     async def setup_hook(self) -> None:
@@ -1156,7 +1292,7 @@ class PandaBot(commands.Bot):
         if self._broadcaster:
             await self.context.refresh(self, self._broadcaster)
         if self._chat_subscription_active:
-            self.idle_chatter.start()
+            self._start_idle_loop()
         LOGGER.info(
             "PandaBot (%s, Account: %s) ist online und mit %s verbunden!",
             settings.bot_name,
@@ -1165,10 +1301,8 @@ class PandaBot(commands.Bot):
         )
 
     async def close(self, **options: object) -> None:
-        # Sauberes Herunterfahren: Routine stoppen, Session schließen.
-        # cancel() ist intern gegen "kein laufender Task" abgesichert, daher
-        # kein vorheriger Status-Check nötig (Routine hat kein .running).
-        self.idle_chatter.cancel()
+        # Sauberes Herunterfahren: adaptiven Idle-Task stoppen, Session schließen.
+        await self._stop_idle_loop()
         await self.llm.close()
         await super().close(**options)
 
@@ -1191,6 +1325,7 @@ class PandaBot(commands.Bot):
         self._idle_messages_since_human = 0
         if settings.user_memory_enabled:
             self.user_memory.touch(payload.chatter.id, author)
+            self.user_memory.record_interaction(payload.chatter.id, author)
         self.chat_history.append(("user", f"{author}: {text}"))
         LOGGER.info("Chat empfangen von %s (%s): %s", author, payload.chatter.id, text)
 
@@ -1564,13 +1699,14 @@ class PandaBot(commands.Bot):
     def _memory_excerpt(self, memory: str) -> str:
         """Filtert aus dem User-Gedächtnis nur die inhaltlichen Notiz-Bullets.
 
-        Kopf- und Verwaltungszeilen (ID, Anzeigename, Sprachstatistik) haben im
-        Prompt nichts verloren - genau solche Label-Zeilen spiegeln Modelle
-        gern wörtlich zurück.
+        Kopf- und Verwaltungszeilen (ID, Anzeigename, Sprachstatistik,
+        Interaktionszähler) haben im Prompt nichts verloren - genau solche
+        Label-Zeilen spiegeln Modelle gern wörtlich zurück.
         """
         skip_prefixes = (
             "- Twitch-User-ID:",
             "- Anzeigename zuletzt gesehen:",
+            "- Interaktionen:",
             "- Häufigste Sprache:",
             "- Zählung:",
             "- Hinweis:",
@@ -1580,7 +1716,7 @@ class PandaBot(commands.Bot):
             for line in memory.splitlines()
             if line.strip().startswith("- ") and not line.strip().startswith(skip_prefixes)
         ]
-        return "\n".join(lines[-6:])
+        return "\n".join(lines[-8:])
 
     def _chat_system_prompt(
         self,
@@ -1753,6 +1889,8 @@ class PandaBot(commands.Bot):
             # respond() sendet die Nachricht in den Kanal der Ursprungsnachricht.
             await payload.respond(reply)
             self._remember_bot_message(reply)
+            self._remember_opener(reply)
+            self._record_user_interaction(payload.chatter.id, trigger, reply)
             LOGGER.info("Antwort gesendet: %s", reply)
             asyncio.create_task(
                 self._remember_user_later(
@@ -1762,66 +1900,230 @@ class PandaBot(commands.Bot):
                     bot_reply=reply,
                 )
             )
+            self._maybe_summarize_profile(payload.chatter.id, author)
         except Exception:  # noqa: BLE001
             LOGGER.exception("Konnte Nachricht nicht senden")
 
-    # ----- Idle-Routine ------------------------------------------------------ #
-    @routines.routine(delta=datetime.timedelta(seconds=60))
-    async def idle_chatter(self) -> None:
-        """Meldet sich, wenn der Chat länger als ``idle_threshold`` still ist."""
-        idle_for = time.monotonic() - self._last_activity
-        if idle_for < settings.idle_threshold or self._llm_lock.locked():
+    # ----- Profil-Consolidation & Opener-Tracking --------------------------- #
+    def _record_user_interaction(
+        self, user_id: str, user_message: str, bot_reply: str
+    ) -> None:
+        """Puffert ein (User-Nachricht, Bot-Antwort)-Paar für die Consolidation."""
+        buf = self._user_interactions.setdefault(
+            user_id, deque(maxlen=settings.profile_interactions_kept)
+        )
+        buf.append((user_message, bot_reply))
+
+    def _maybe_summarize_profile(self, user_id: str, author: str) -> None:
+        """Startet ggf. eine Hintergrund-Consolidation des User-Profils."""
+        if not settings.user_memory_enabled:
             return
-        if settings.idle_max_solo_messages <= 0:
-            LOGGER.debug("Idle-Chatter ist per IDLE_MAX_SOLO_MESSAGES deaktiviert")
+        if user_id in self._summarizing:
             return
-        if self._idle_messages_since_human >= settings.idle_max_solo_messages:
-            LOGGER.debug(
-                "Idle-Chatter pausiert: %s eigene Nachricht(en) ohne echte Chat-Antwort",
-                self._idle_messages_since_human,
+        memory = self.user_memory.load(user_id, author)
+        count = self.user_memory.interaction_count(memory)
+        if not self.user_memory.should_summarize(count):
+            return
+        self._summarizing.add(user_id)
+        asyncio.create_task(self._summarize_profile_later(user_id=user_id, author=author))
+
+    async def _summarize_profile_later(self, *, user_id: str, author: str) -> None:
+        """Fasst das Profil einer Person reichhaltig zusammen (Hintergrund-Task).
+
+        Kombiniert bestehende Notizen mit den letzten direkten Gesprächen zu
+        einem aktuellen Profil: WER die Person ist und WIE der Bot mit ihr
+        reden soll. Die gesamte '## Notizen'-Sektion wird konsolidiert neu
+        geschrieben (kein ungeprüftes Anwachsen über Monate).
+        """
+        try:
+            existing = self.user_memory.load(user_id, author)
+            pairs = list(self._user_interactions.get(user_id, []))
+            dialogue = (
+                "\n".join(
+                    f"User: {user_msg}\nBot: {bot or '(keine Antwort)'}"
+                    for user_msg, bot in pairs[-settings.profile_interactions_kept :]
+                )
+                or "(noch keine direkten Gespräche)"
             )
+            system = (
+                "Du pflegst ein kompaktes, lokales Gedächtnis eines Twitch-Chatbots über eine bestimmte Person. "
+                "Fasse ALLES Bekannte (bestehende Notizen + die gezeigten Gespräche) zu einem aktuellen, klaren Profil zusammen, "
+                "das genau beschreibt, WER die Person ist und WIE der Bot mit ihr reden sollte, wenn sie ihn anspricht. "
+                "Nutze nur Kategorien, zu denen wirklich etwas da ist, als kurze Markdown-Bullets:\n"
+                "- Anrede/Name: Wie soll der Bot die Person nennen/anreden?\n"
+                "- Interessen/Themen: Worum geht's häufig?\n"
+                "- Humor & Stil: frech? trocken? ernst? schräg?\n"
+                "- Distanz/Ton: wie locker/formell, Duzen?\n"
+                "- Wünsche/Präferenzen: wiederkehrende Bitten oder No-Gos\n"
+                "- Sonstiges: Stimmung, Besonderheiten\n"
+                "Regeln: Nur dauerhaft Nützliches. Keine einmaligen Fragen, keine aktuelle Chat-Stimmung, "
+                "keine sensiblen/privaten Daten, keine Spekulation, keine Sprache als Notiz (wird separat gezählt). "
+                "Behalte bewährte alte Notizen bei, kürze/verschmelze aber Doppeltes. "
+                f"Maximal {settings.profile_max_notes} Bullets, jeder maximal ~25 Wörter. "
+                "Wenn absolut nichts Profilwürdiges vorhanden ist, antworte exakt: KEINE."
+            )
+            prompt = (
+                f"Person: {author} (ID {user_id})\n\n"
+                f"Bestehende Notizen:\n{existing[-1600:]}\n\n"
+                f"Aktuelle direkte Gespräche (älteste zuerst):\n{dialogue}\n\n"
+                "Schreibe das konsolidierte Profil (nur die Bullets, kein Vorwort)."
+            )
+
+            try:
+                summary = await self.llm.complete(
+                    system, [("user", prompt)], allow_prefill=False
+                )
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Profil-Consolidation fehlgeschlagen")
+                return
+
+            if not summary or summary.strip().lower().startswith("keine"):
+                return
+            if self.llm._looks_like_reasoning(summary):
+                return
+            try:
+                self.user_memory.rewrite_notes(user_id, author, summary)
+            except OSError:
+                LOGGER.exception("Konsolidiertes Profil konnte nicht gespeichert werden")
+        finally:
+            self._summarizing.discard(user_id)
+
+    def _opener_of(self, text: str) -> str:
+        """Fingerprint der ersten Wörter einer Nachricht (Opener-Schutz)."""
+        words = re.findall(r"\S+", (text or "").strip())
+        return " ".join(words[:8]).lower()
+
+    def _remember_opener(self, text: str) -> None:
+        opener = self._opener_of(text)
+        if opener:
+            self._recent_openers.append(opener)
+
+    def _is_recent_opener_repeat(self, text: str) -> bool:
+        opener = self._opener_of(text)
+        if not opener:
+            return False
+        for previous in self._recent_openers:
+            if SequenceMatcher(None, opener, previous).ratio() >= 0.7:
+                return True
+        return False
+
+    # ----- Idle: ereignisgesteuert statt starrer Poll-Zyklus ----------------- #
+    def _start_idle_loop(self) -> None:
+        """Startet den adaptiven Idle-Task genau einmal."""
+        if self._idle_task is None or self._idle_task.done():
+            self._idle_task = asyncio.create_task(self._idle_loop())
+
+    async def _stop_idle_loop(self) -> None:
+        if self._idle_task is None:
             return
+        task = self._idle_task
+        self._idle_task = None
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    def _idle_next_delay(self) -> float:
+        """Sekunden bis zur nächsten relevanten Idle-Prüfung.
+
+        Kein fester 60s-Tick: Der Schlafzeitraum wird pro Iteration aus der
+        letzten echten Chat-Aktivität neu berechnet - der Task wacht erst dann
+        auf, wenn Stille wirklich ``idle_threshold`` erreicht (+ Jitter). Jede
+        Chat-Nachricht verschiebt ``_last_activity`` und damit automatisch den
+        nächsten Weckruf. Das ist interaktiv, kein fixer Zyklus.
+        """
+        threshold = settings.idle_threshold
+        if threshold <= 0 or settings.idle_max_solo_messages <= 0:
+            # Idle deaktiviert: nur selten prüfen (falls es per Env aktiviert wird).
+            return 300.0
+        jitter = random.uniform(0.0, max(0.0, float(settings.idle_jitter)))
+        deadline = self._last_activity + threshold + jitter
+        return max(1.0, deadline - time.monotonic())
+
+    async def _idle_loop(self) -> None:
+        """Langlaufender Hintergrund-Task: wacht nur auf, wenn Stille erreicht ist."""
+        try:
+            while True:
+                delay = self._idle_next_delay()
+                try:
+                    await asyncio.sleep(delay)
+                except asyncio.CancelledError:
+                    raise
+
+                idle_for = time.monotonic() - self._last_activity
+                if idle_for < settings.idle_threshold:
+                    continue
+                if settings.idle_max_solo_messages <= 0:
+                    continue
+                if self._idle_messages_since_human >= settings.idle_max_solo_messages:
+                    # Wartet auf eine echte Chat-Nachricht (resettet Zähler + Deadline).
+                    continue
+                if self._llm_lock.locked():
+                    await asyncio.sleep(15.0)
+                    continue
+                await self._do_idle_message(idle_for)
+        except asyncio.CancelledError:
+            LOGGER.debug("Idle-Task wurde beendet")
+            raise
+
+    async def _do_idle_message(self, idle_for: float) -> None:
+        """Erzeugt genau eine selbstinitiierte Idle-Nachricht und sendet sie.
+
+        Wird nur aus ``_idle_loop`` gerufen, nachdem Stille bestätigt ist.
+        Sprich keine Lurker an, sondern starte ein Topic / Gespräch.
+        """
         if not self._broadcaster:
             return
-
-        # Nur aktiv werden, wenn der Stream tatsächlich live ist.
         await self.context.refresh(self, self._broadcaster)
         if not self.context.is_live:
             LOGGER.debug("Stream offline, Idle-Chatter pausiert")
             return
 
-        LOGGER.info("Chat ruhig (%.0fs), PandaBot wird aktiv", idle_for)
-        # Wir bauen den Idle-Prompt ohne konkrete Nachricht; senden via Broadcaster.
+        LOGGER.info("Chat ruhig (%.0fs), PandaBot wirft ein Topic ein", idle_for)
         async with self._llm_lock:
             system_prompt = build_system_prompt(self.context) + (
-                "\n\nSondersituation: Der Chat ist gerade still und niemand hat dich "
-                "angesprochen. Du meldest dich von selbst, um das Gespräch sanft "
-                "anzustoßen. Antworte auf Deutsch, locker und kurz."
+                "\n\nSondersituation: Der Chat ist still und niemand hat dich angesprochen. "
+                "Du meldest dich von SELBST, um ein Gespräch sanft anzustoßen. "
+                "Sprich NIEMALS Lurker an (kein 'ihr Lurker', keine Zuschauerzahlen, "
+                "niemanden beim stillen Mitlesen outen oder bedrängen). Wirf stattdessen "
+                "ein konkretes Topic, eine kleine Beobachtung oder eine offene Frage in den "
+                "Raum. Antworte auf Deutsch, locker, kurz und ohne Druck - kein Betteln um "
+                "Aktivität, kein 'schreibt mal was'."
             )
             recent_bot = (
-                "\n".join(f"- {message}" for message in self._recent_bot_messages)
+                "\n".join(f"- {msg}" for msg in self._recent_bot_messages)
                 or "(noch keine eigenen Bot-Nachrichten)"
+            )
+            recent_openers = (
+                "\n".join(f"- {op}" for op in self._recent_openers) or "(noch keine)"
             )
             turns = self._history_turns(limit=settings.history_length)
             turns.append(
                 (
                     "user",
                     (
-                        f"(Stille seit etwa {int(idle_for)} Sekunden. Schreibe genau eine kurze, "
-                        "lockere Nachricht passend zum Spiel oder Stream - konkret und "
-                        "interaktiv, z. B. eine neue Frage oder kleine Beobachtung. "
-                        "Wiederhole keinen Einstieg, keine Frage und keinen Gag aus diesen "
-                        f"früheren eigenen Nachrichten:\n{recent_bot}\n"
-                        "Wenn bisher fast nur du gesprochen hast, nicht betteln oder pushen.)"
+                        f"(Stille seit etwa {int(idle_for)} Sekunden. Niemand hat geschrieben. "
+                        "Schreibe GENAU EINE kurze, lockere Nachricht, die ein NEUES Gespräch "
+                        f"startet - passend zu '{self.context.game}' oder einem allgemeinen Topic "
+                        "(Frage, kleine Story, Beobachtung, Gesprächsaufhänger). "
+                        "Wiederhole KEINEN dieser früheren eigenen Einstiege/Gags/Fragen:\n"
+                        f"{recent_bot}\n"
+                        "Und vermeide diese schon genutzten Gesprächsöffner (Thema/Wortwahl):\n"
+                        f"{recent_openers}\n"
+                        "Sprich keine Lurker an. Keine Meta-Sätze. "
+                        "Nur deine fertige Chat-Nachricht.)"
                     ),
                 )
             )
             reply = await self.llm.complete(system_prompt, turns)
 
-        if reply and self._is_recent_bot_repeat(reply):
+        if reply and (
+            self._is_recent_bot_repeat(reply) or self._is_recent_opener_repeat(reply)
+        ):
             LOGGER.info(
-                "Idle-Nachricht übersprungen, weil sie einer eigenen Nachricht zu ähnlich war: %s",
-                reply,
+                "Idle-Nachricht übersprungen (Wiederholung/ähnlicher Opener): %s", reply
             )
             self._last_activity = time.monotonic()
             self._idle_messages_since_human += 1
@@ -1831,6 +2133,7 @@ class PandaBot(commands.Bot):
             try:
                 await self._broadcaster.send_message(reply, settings.bot_id)
                 self._remember_bot_message(reply)
+                self._remember_opener(reply)
                 self._idle_messages_since_human += 1
             except Exception:  # noqa: BLE001
                 LOGGER.exception("Konnte Idle-Nachricht nicht senden")
@@ -1844,6 +2147,11 @@ class PandaBot(commands.Bot):
 def _select_llm_backend() -> None:
     """Fragt beim Start, ob PandaBot lokal oder online antworten soll."""
     configured = settings.llm_backend.strip().lower()
+    # Env-Shortcut: 'online-a4b' / 'gemma-a4b' wählt direkt die MoE-Alternative.
+    online_model_override: str | None = None
+    if configured in ("online-a4b", "gemma-a4b", "a4b"):
+        configured = "online"
+        online_model_override = "gemma-4-26b-a4b"
     if configured in (
         "1",
         "l",
@@ -1852,13 +2160,21 @@ def _select_llm_backend() -> None:
         "llama",
         "llama-server",
         "2",
+        "3",
         "o",
         "online",
         "google",
         "gemini",
         "gemma",
+        "gemma-4-31b-it",
+        "gemma-4-26b-a4b",
     ):
-        settings.apply_llm_backend(configured)
+        model = (
+            "gemma-4-26b-a4b"
+            if configured in ("3", "gemma-4-26b-a4b")
+            else online_model_override
+        )
+        settings.apply_llm_backend(configured, online_model=model)
         LOGGER.info("LLM-Profil: %s", settings.llm_backend_label)
         return
     if configured not in ("", "ask", "prompt", "frage"):
@@ -1874,15 +2190,19 @@ def _select_llm_backend() -> None:
     prompt = (
         "\nPandaBot LLM auswählen:\n"
         f"  [1] Lokal: llama-server ({settings.llm_model} @ {settings.llm_url})\n"
-        f"  [2] Online: Google Gemma 4 31B IT ({settings.google_llm_model})\n"
-        "Auswahl [1/2, Enter=1]: "
+        "  [2] Online: Google Gemma 4 31B IT (gemma-4-31b-it)\n"
+        "  [3] Online: Google Gemma 4 26B A4B / MoE (gemma-4-26b-a4b)\n"
+        "Auswahl [1/2/3, Enter=1]: "
     )
     while True:
         choice = input(prompt).strip().lower() or "1"
         if choice in ("1", "l", "local", "lokal", "llama", "llama-server"):
             settings.apply_llm_backend("local")
             break
-        if choice in ("2", "o", "online", "google", "gemini", "gemma"):
+        if choice in (
+            "2", "3", "o", "online", "google", "gemini", "gemma",
+            "gemma-4-31b-it", "gemma-4-26b-a4b",
+        ):
             if not (settings.google_api_key or settings.llm_api_key):
                 key = getpass.getpass(
                     "GOOGLE_API_KEY/GEMINI_API_KEY nicht gefunden. "
@@ -1892,9 +2212,10 @@ def _select_llm_backend() -> None:
                     settings.apply_llm_backend("local")
                     break
                 settings.google_api_key = key
-            settings.apply_llm_backend("online")
+            online_model = "gemma-4-26b-a4b" if choice in ("3", "gemma-4-26b-a4b") else None
+            settings.apply_llm_backend("online", online_model=online_model)
             break
-        print("Bitte 1/lokal oder 2/online eingeben.")
+        print("Bitte 1/lokal, 2 oder 3/online eingeben.")
 
     LOGGER.info("LLM-Profil: %s", settings.llm_backend_label)
 

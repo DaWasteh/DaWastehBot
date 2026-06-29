@@ -112,7 +112,11 @@ class Settings:
 
     # --- Verhalten ---
     history_length: int = field(default_factory=lambda: int(os.getenv("HISTORY_LENGTH", "16")))
+    # Idle ist NICHT mehr ein starrer Poll-Zyklus, sondern ereignisgesteuert:
+    # Der Hintergrund-Task schläft bis (letzte_Aktivität + idle_threshold + Jitter)
+    # und wird bei jeder echten Chat-Nachricht neu auf diesen Zeitpunkt gelegt.
     idle_threshold: int = field(default_factory=lambda: int(os.getenv("IDLE_THRESHOLD", "900")))
+    idle_jitter: int = field(default_factory=lambda: int(os.getenv("IDLE_JITTER", "90")))
     idle_max_solo_messages: int = field(
         default_factory=lambda: int(os.getenv("IDLE_MAX_SOLO_MESSAGES", "1"))
     )
@@ -125,31 +129,69 @@ class Settings:
         default_factory=lambda: _env_bool("USER_MEMORY_ENABLED", True)
     )
 
+    # --- Reichhaltige Chatter-Profile (Auto-Summary) ---
+    # Ab PROFILE_SUMMARY_AFTER echten Interaktionen wird erstmals ein kompaktes
+    # Profil (Fakten + Gesprächsstil) erstellt, danach alle
+    # PROFILE_SUMMARY_INTERVAL Interaktionen aufgefrischt. 0 deaktiviert die
+    # automatische Zusammenfassung (dann wächst das Profil nur über explizite
+    # "merk dir / remember"-Signale).
+    profile_summary_after: int = field(
+        default_factory=lambda: int(os.getenv("PROFILE_SUMMARY_AFTER", "2"))
+    )
+    profile_summary_interval: int = field(
+        default_factory=lambda: int(os.getenv("PROFILE_SUMMARY_INTERVAL", "5"))
+    )
+    profile_interactions_kept: int = field(
+        default_factory=lambda: int(os.getenv("PROFILE_INTERACTIONS_KEPT", "8"))
+    )
+    profile_max_notes: int = field(
+        default_factory=lambda: int(os.getenv("PROFILE_MAX_NOTES", "10"))
+    )
+
     def _normalized_google_model(self) -> str:
         """Normalisiert häufige Vertipper/Aliase für das Google-Online-Profil."""
         model = self.google_llm_model.strip()
+        # Die API-Modell-ID heißt Gemma, auch wenn sie über die Gemini API läuft.
+        # "a4b" = aktive Parameter bei MoE-Varianten (z. B. gemma-4-26b-a4b).
         aliases = {
-            # Die API-Modell-ID heißt Gemma, auch wenn sie über die Gemini API läuft.
             "gemini-4-31b-it": "gemma-4-31b-it",
             "google/gemma-4-31b-it": "gemma-4-31b-it",
+            "gemini-4-26b-a4b": "gemma-4-26b-a4b",
+            "google/gemma-4-26b-a4b": "gemma-4-26b-a4b",
+            "gemma-4-26b-it-a4b": "gemma-4-26b-a4b",
+            "gemma-4-26b-a4b-it": "gemma-4-26b-a4b",
         }
         return aliases.get(model.lower(), model)
 
-    def apply_llm_backend(self, backend: str) -> None:
-        """Aktiviert zur Laufzeit das lokale oder Google/Gemma-LLM-Profil."""
+    def apply_llm_backend(self, backend: str, *, online_model: str | None = None) -> None:
+        """Aktiviert zur Laufzeit das lokale oder Google/Gemma-LLM-Profil.
+
+        ``online_model`` überschreibt das Google-Modell (z. B. ``gemma-4-26b-a4b``
+        als Alternative zum Default ``gemma-4-31b-it``) und wird normalisiert.
+        """
         normalized = backend.strip().lower()
         if normalized in ("1", "l", "local", "lokal", "llama", "llama-server"):
             self.llm_backend = "local"
             self.llm_backend_label = f"lokaler llama-server ({self.llm_model} @ {self.llm_url})"
             return
 
-        if normalized in ("2", "o", "online", "google", "gemini", "gemma"):
+        if normalized in (
+            "2", "3", "o", "online", "google", "gemini", "gemma",
+            "gemma-4-31b-it", "gemma-4-26b-a4b",
+        ):
             api_key = self.google_api_key or self.llm_api_key
             if not api_key:
                 raise RuntimeError(
                     "Online-LLM gewählt, aber kein Google API Key gefunden. "
                     "Setze GOOGLE_API_KEY oder GEMINI_API_KEY in deiner .env."
                 )
+            # Menu/Override: explizites Modell schlägt den Default aus der .env.
+            if online_model:
+                self.google_llm_model = online_model
+            # Menu-Shortcut „3"/Alternative -> MoE-Variante, außer online_model
+            # wurde schon anders gesetzt.
+            elif normalized == "3":
+                self.google_llm_model = "gemma-4-26b-a4b"
             self.llm_backend = "online"
             self.google_llm_model = self._normalized_google_model()
             self.llm_backend_label = f"Google Gemini API ({self.google_llm_model})"

@@ -8,6 +8,7 @@ werden kann.
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
@@ -736,3 +737,214 @@ def test_history_turns_excludes_current_user_message(bot: PandaBot) -> None:
     turns = bot._history_turns(limit=10, current=("user", "Alice: PandaBot erzähl was"))
 
     assert turns == [("user", "Alice: hi"), ("assistant", "Servus Alice!")]
+
+
+# --------------------------------------------------------------------------- #
+#  Neue Tests: reichhaltige Profile, adaptiver Idle-Scheduler, MoE-Modell     #
+# --------------------------------------------------------------------------- #
+def test_record_interaction_increments_and_persists(tmp_path) -> None:
+    store = UserMemoryStore(str(tmp_path))
+
+    count = store.record_interaction("77", "Rita")
+    assert count == 1
+    count = store.record_interaction("77", "Rita")
+    assert count == 2
+
+    memory = store.load("77", "Rita")
+    assert store.interaction_count(memory) == 2
+    assert "- Interaktionen: 2" in memory
+
+
+@pytest.mark.parametrize(
+    ("after", "interval", "count", "expected"),
+    [
+        (2, 5, 1, False),
+        (2, 5, 2, True),
+        (2, 5, 3, False),
+        (2, 5, 5, False),
+        (2, 5, 7, True),
+        (2, 5, 12, True),
+        (0, 5, 5, False),  # komplett deaktiviert
+        (2, 0, 2, True),   # nur die erste Zusammenfassung
+    ],
+)
+def test_should_summarize(
+    monkeypatch: pytest.MonkeyPatch, after: int, interval: int, count: int, expected: bool
+) -> None:
+    monkeypatch.setattr(settings, "profile_summary_after", after)
+    monkeypatch.setattr(settings, "profile_summary_interval", interval)
+    store = UserMemoryStore("ignored")
+    assert store.should_summarize(count) is expected
+
+
+def test_rewrite_notes_replaces_section(tmp_path) -> None:
+    store = UserMemoryStore(str(tmp_path))
+    store.append("5", "Felix", "- Felix mag Katzen")
+    store.append("5", "Felix", "- alte temporäre Notiz")
+
+    store.rewrite_notes(
+        "5",
+        "Felix",
+        "- Anrede: einfach Felix\n- Interessen: Katzen, Synthesizer\n- Stil: trocken-frech",
+    )
+    memory = store.load("5", "Felix")
+
+    assert "alte temporäre Notiz" not in memory
+    assert "mag Katzen" not in memory
+    assert "Interessen: Katzen, Synthesizer" in memory
+    assert "Stil: trocken-frech" in memory
+
+
+def test_rewrite_notes_dedups_near_identical_bullets(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "profile_max_notes", 10)
+    store = UserMemoryStore(str(tmp_path))
+
+    store.rewrite_notes(
+        "6",
+        "Nina",
+        "- Nina spielt gerne Synthesizer\n"
+        "- Nina spielt gern Synthesizer\n"  # fast identisch -> wird gedroppt
+        "- Nina hat einen Hund namens Bello",
+    )
+    memory = store.load("6", "Nina")
+
+    assert memory.count("Synthesizer") == 1
+    assert "Hund namens Bello" in memory
+
+
+def test_normalized_google_model_handles_a4b_aliases() -> None:
+    fresh = Settings()
+    for alias in (
+        "gemma-4-26b-a4b",
+        "gemini-4-26b-a4b",
+        "google/gemma-4-26b-a4b",
+        "gemma-4-26b-it-a4b",
+        "gemma-4-26b-a4b-it",
+    ):
+        fresh.google_llm_model = alias
+        assert fresh._normalized_google_model() == "gemma-4-26b-a4b", alias
+
+
+def test_apply_llm_backend_online_with_a4b_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    fresh = Settings()
+    monkeypatch.setattr(fresh, "google_api_key", "test-key")
+
+    fresh.apply_llm_backend("online", online_model="gemma-4-26b-a4b")
+
+    assert fresh.llm_backend == "online"
+    assert fresh.llm_model == "gemma-4-26b-a4b"
+    assert fresh.llm_send_repeat_penalty is False
+    assert fresh.llm_send_llama_extras is False
+    assert fresh.llm_use_system_role is False  # Gemma kennt keine System-Rolle
+
+
+def test_apply_llm_backend_menu_shortcut_3_picks_a4b(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh = Settings()
+    monkeypatch.setattr(fresh, "google_api_key", "test-key")
+
+    fresh.apply_llm_backend("3")
+
+    assert fresh.llm_model == "gemma-4-26b-a4b"
+
+
+def test_idle_next_delay_is_adaptive(
+    bot: PandaBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "idle_threshold", 900)
+    monkeypatch.setattr(settings, "idle_jitter", 90)
+    monkeypatch.setattr(settings, "idle_max_solo_messages", 1)
+    bot._last_activity = time.monotonic()
+
+    delay = bot._idle_next_delay()
+
+    # Ereignisgesteuert: schläft bis etwa threshold (+ Jitter), nicht starr 60s.
+    assert 900.0 <= delay <= 990.0
+
+
+def test_idle_next_delay_floors_to_one_second(bot: PandaBot, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "idle_threshold", 10)
+    monkeypatch.setattr(settings, "idle_jitter", 0)
+    monkeypatch.setattr(settings, "idle_max_solo_messages", 1)
+    bot._last_activity = time.monotonic() - 10000  # Deadline lange vorbei
+
+    assert bot._idle_next_delay() == 1.0
+
+
+def test_idle_next_delay_returns_long_sleep_when_disabled(
+    bot: PandaBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "idle_max_solo_messages", 0)
+    assert bot._idle_next_delay() == 300.0
+
+
+def test_opener_repeat_detection(bot: PandaBot) -> None:
+    bot._remember_opener("Hey Leute, was macht ihr heute so im Stream?")
+
+    assert bot._is_recent_opener_repeat("Hey Leute, was macht ihr morgen so?")
+    assert not bot._is_recent_opener_repeat("Welches Spiel soll ich als nächstes anschauen?")
+
+
+def test_record_user_interaction_buffers_pairs(bot: PandaBot) -> None:
+    bot._record_user_interaction("1", "Hallo Panda", "Servus!")
+
+    assert dict(bot._user_interactions)["1"][-1] == ("Hallo Panda", "Servus!")
+
+
+def test_system_prompt_forbids_addressing_lurkers() -> None:
+    ctx = StreamContext()
+    ctx.game = "Just Chatting"
+    ctx.title = "Quatsch"
+    prompt = build_system_prompt(ctx)
+
+    assert "LURKER" in prompt
+    assert "Lurker" in prompt
+
+
+def test_maybe_summarize_profile_gates_on_threshold(
+    bot: PandaBot, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Consolidation darf erst nach PROFILE_SUMMARY_AFTER Interaktionen feuern."""
+    monkeypatch.setattr(settings, "user_memory_enabled", True)
+    monkeypatch.setattr(settings, "profile_summary_after", 3)
+    monkeypatch.setattr(settings, "profile_summary_interval", 10)
+    bot.user_memory = UserMemoryStore(str(tmp_path))
+    started: list[str] = []
+
+    async def fake_summarize(*, user_id: str, author: str) -> None:
+        started.append(user_id)
+
+    monkeypatch.setattr(bot, "_summarize_profile_later", fake_summarize)
+
+    async def scenario() -> None:
+        bot.user_memory.record_interaction("9", "Niki")  # count 1
+        bot.user_memory.record_interaction("9", "Niki")  # count 2
+        bot._maybe_summarize_profile("9", "Niki")
+        await asyncio.sleep(0)  # ggf. geplante Tasks laufen lassen
+        assert started == []
+
+        bot.user_memory.record_interaction("9", "Niki")  # count 3 -> fällig
+        bot._maybe_summarize_profile("9", "Niki")
+        await asyncio.sleep(0)
+        assert started == ["9"]
+
+    asyncio.run(scenario())
+
+
+def test_event_message_increments_interaction_count(
+    bot: PandaBot, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "user_memory_enabled", True)
+    bot.user_memory = UserMemoryStore(str(tmp_path))
+    payload = SimpleNamespace(
+        chatter=SimpleNamespace(id="321", name="kiwi", display_name="Kiwi"),
+        text="servus",
+    )
+
+    asyncio.run(bot.event_message(_chat_message(payload)))
+
+    memory = (tmp_path / "321.md").read_text(encoding="utf-8")
+    assert "- Interaktionen: 1" in memory

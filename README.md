@@ -10,8 +10,11 @@ für Unterhaltung.
 
 - **Mitlesen & antworten:** Reagiert, wenn jemand den Bot beim Namen nennt – sowohl beim echten Account-Namen (z. B. `@dawastehbot`) als auch bei einem optionalen Spitznamen aus `TWITCH_BOT_NAME`.
 - **Chatverlauf als echtes Gespräch:** Die letzten Nachrichten (inklusive der eigenen Antworten) gehen als richtige user/assistant-Turns ans Modell - nicht als Text-Blob. Das hält den Bot im Gesprächsfluss und verhindert, dass Modelle Prompt-Bausteine in den Chat zurückspiegeln.
+- **Lokales Profil pro Chatter:** Für jeden Zuschauer legt PandaBot eine Markdown-Datei in `uservault/` an. Nach wenigen Interaktionen fasst ein Hintergrund-Task automatisch zusammen, **wer** die Person ist und **wie** der Bot mit ihr reden soll (Anrede, Interessen, Humor, Distanz, wiederkehrende Wünsche). Beim nächsten Ansprechen fließen diese Notizen unsichtbar in den Prompt ein.
 - **Live-Streamkontext:** Aktuelles Spiel und Stream-Titel werden automatisch über die Twitch-API geholt und in den Prompt eingebaut.
-- **Bei Stille aktiv:** Ist der Chat eine Weile ruhig (und der Stream live), wirft der Bot von selbst einen Gesprächsaufhänger ein.
+- **Interaktiv statt fixer Zyklus:** PandaBot pollt nicht stur alle 60 Sekunden. Der Idle-Task ist **ereignisgesteuert** – er schläft bis die Stille wirklich `IDLE_THRESHOLD` erreicht (+ Jitter) und wird bei jeder echten Chat-Nachricht automatisch auf diesen Zeitpunkt neu gelegt.
+- **Stille = Gesprächsstarter, nie Lurker-Callout:** Ist der Chat ruhig (und der Stream live), wirft der Bot von selbst ein konkretes Topic, eine Frage oder Beobachtung in den Raum. Er **spricht niemals Lurker an**, outet niemanden beim Mitlesen und kommentiert keine Zuschauerzahlen.
+- **Kein Dauergeschwätz:** Höchstens `IDLE_MAX_SOLO_MESSAGES` eigene Beiträge ohne menschliche Reaktion; danach wartet der Bot auf echten Chat. Opener und ganze Antworten werden gegen frühere Beiträge abgeglichen, damit sich nichts wiederholt.
 - **`!panda <frage>`-Befehl:** Direkter Draht zum Bot.
 - **Robust:** Ist das LLM-Backend mal weg, schweigt der Bot einfach, statt abzustürzen.
 
@@ -122,11 +125,13 @@ Beim Start fragt PandaBot standardmäßig:
 
 ```text
 [1] Lokal: llama-server
-[2] Online: Google Gemma 4 31B IT
+[2] Online: Google Gemma 4 31B IT (gemma-4-31b-it)
+[3] Online: Google Gemma 4 26B A4B / MoE (gemma-4-26b-a4b)
 ```
 
-Mit `LLM_BACKEND=local` oder `LLM_BACKEND=online` in der `.env` kannst du die
-Abfrage überspringen. Für den Online-Modus brauchst du einen API-Key aus
+Mit `LLM_BACKEND=local`, `LLM_BACKEND=online` (Default-Modell aus `.env`) oder
+`LLM_BACKEND=online-a4b` (MoE-Alternative) in der `.env` kannst du die Abfrage
+überspringen. Für den Online-Modus brauchst du einen API-Key aus
 [Google AI Studio](https://aistudio.google.com/app/apikey):
 
 ```env
@@ -181,7 +186,23 @@ Ist ein LLM-Backend ausgewählt/erreichbar und der Bot gestartet, läuft alles a
 
 - Schreibe im Chat `PandaBot, wie geht's?` → der Bot antwortet.
 - Nutze `!panda Was hältst du vom Spiel?` für einen direkten Befehl.
-- Bleibt der Chat ruhig, meldet sich der Bot nach `IDLE_THRESHOLD` Sekunden selbst. Danach wartet er bei `IDLE_MAX_SOLO_MESSAGES=1` auf echte Chat-Aktivität, statt allein weiterzureden.
+- Bleibt der Chat ruhig, meldet sich der Bot nach `IDLE_THRESHOLD` Sekunden mit einem Gesprächsaufhänger. Er **spricht dabei keine Lurker an**, sondern startet ein Topic. Danach wartet er bei `IDLE_MAX_SOLO_MESSAGES=1` auf echte Chat-Aktivität, statt allein weiterzureden.
+- Wer den Bot öfter anspricht, bekommt automatisch ein reichhaltigeres Profil – die nächste Antwort passt sich in Ton und Inhalt an.
+
+## Chatter-Profile (`uservault/`)
+
+Pro Twitch-User-ID liegt eine Markdown-Datei mit:
+
+- Anzeigename & Interaktionszähler,
+- einem **Sprachprofil** (automatische Zählung der erkannten Sprachen),
+- und **Notizen**, die der Hintergrund-Task nach `PROFILE_SUMMARY_AFTER` bzw.
+  `PROFILE_SUMMARY_INTERVAL` Interaktionen konsolidiert: Anrede, Interessen,
+  Humor & Stil, Distanz/Ton, wiederkehrende Wünsche, Besonderheiten.
+
+Die Notizen sind „stille Hintergrundnotizen“ – sie fließen in Antworten ein,
+werden aber nie erwähnt, zitiert oder aufgezählt. Explizite „merk dir …“-Bitten
+werden zusätzlich sofort erfasst. Mit `USER_MEMORY_ENABLED=false` schaltest du
+alles aus, mit `PROFILE_SUMMARY_AFTER=0` nur die automatische Zusammenfassung.
 
 ## Projektstruktur
 
@@ -212,9 +233,16 @@ Ist ein LLM-Backend ausgewählt/erreichbar und der Bot gestartet, läuft alles a
 | `GOOGLE_LLM_MAX_TOKENS` | `200` | Maximale Antwortlänge online (inkl. Puffer für gefilterte `<thought>`-Blöcke) |
 | `GOOGLE_LLM_TIMEOUT` | `30` | Timeout für Online-Aufrufe |
 | `HISTORY_LENGTH` | `16` | Wie viele Verlaufs-Turns als Kontext dienen (inkl. eigener Bot-Antworten) |
-| `IDLE_THRESHOLD` | `900` | Sekunden Stille bis zur Eigeninitiative |
+| `IDLE_THRESHOLD` | `900` | Sekunden Stille bis zur Eigeninitiative (ereignisgesteuert, kein Poll-Zyklus) |
+| `IDLE_JITTER` | `90` | Max. zufällige Sekunden, die zum Threshold addiert werden |
 | `IDLE_MAX_SOLO_MESSAGES` | `1` | Max. eigene Idle-Nachrichten ohne neue echte Chat-Nachricht (`0` deaktiviert Idle) |
 | `CONTEXT_TTL` | `120` | Cache-Dauer für Titel/Spiel in Sekunden |
+| `USER_MEMORY_ENABLED` | `true` | Lokale Chatter-Profile an/aus |
+| `USER_MEMORY_DIR` | `uservault` | Ordner für die Profil-Dateien |
+| `PROFILE_SUMMARY_AFTER` | `2` | Nach so vielen Interaktionen: erste Profil-Zusammenfassung (`0` = Auto-Summary aus) |
+| `PROFILE_SUMMARY_INTERVAL` | `5` | Alle X weiteren Interaktionen wird das Profil aufgefrischt |
+| `PROFILE_INTERACTIONS_KEPT` | `8` | Wie viele letzte (User,Bot)-Gespräche pro User im Speicher bleiben |
+| `PROFILE_MAX_NOTES` | `10` | Max. Notiz-Bullets im Profil nach einer Consolidation |
 
 ## Sicherheit
 
