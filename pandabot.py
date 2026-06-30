@@ -859,7 +859,9 @@ class UserMemoryStore:
             elif anchor in current:
                 updated = current.replace(anchor, f"{anchor}- Interaktionen: {count}\n", 1)
             else:
-                updated = current.replace("\n## Notizen\n", f"\n- Interaktionen: {count}\n\n## Notizen\n", 1)
+                updated = current.replace(
+                    "\n## Notizen\n", f"\n- Interaktionen: {count}\n\n## Notizen\n", 1
+                )
         try:
             path.write_text(updated, encoding="utf-8")
         except OSError:
@@ -937,8 +939,7 @@ class UserMemoryStore:
             if not norm:
                 continue
             if any(
-                norm == prev or SequenceMatcher(None, norm, prev).ratio() >= 0.9
-                for prev in seen
+                norm == prev or SequenceMatcher(None, norm, prev).ratio() >= 0.9 for prev in seen
             ):
                 continue
             seen.append(norm)
@@ -1905,9 +1906,7 @@ class PandaBot(commands.Bot):
             LOGGER.exception("Konnte Nachricht nicht senden")
 
     # ----- Profil-Consolidation & Opener-Tracking --------------------------- #
-    def _record_user_interaction(
-        self, user_id: str, user_message: str, bot_reply: str
-    ) -> None:
+    def _record_user_interaction(self, user_id: str, user_message: str, bot_reply: str) -> None:
         """Puffert ein (User-Nachricht, Bot-Antwort)-Paar für die Consolidation."""
         buf = self._user_interactions.setdefault(
             user_id, deque(maxlen=settings.profile_interactions_kept)
@@ -1970,9 +1969,7 @@ class PandaBot(commands.Bot):
             )
 
             try:
-                summary = await self.llm.complete(
-                    system, [("user", prompt)], allow_prefill=False
-                )
+                summary = await self.llm.complete(system, [("user", prompt)], allow_prefill=False)
             except Exception:  # noqa: BLE001
                 LOGGER.exception("Profil-Consolidation fehlgeschlagen")
                 return
@@ -2096,9 +2093,7 @@ class PandaBot(commands.Bot):
                 "\n".join(f"- {msg}" for msg in self._recent_bot_messages)
                 or "(noch keine eigenen Bot-Nachrichten)"
             )
-            recent_openers = (
-                "\n".join(f"- {op}" for op in self._recent_openers) or "(noch keine)"
-            )
+            recent_openers = "\n".join(f"- {op}" for op in self._recent_openers) or "(noch keine)"
             turns = self._history_turns(limit=settings.history_length)
             turns.append(
                 (
@@ -2119,12 +2114,8 @@ class PandaBot(commands.Bot):
             )
             reply = await self.llm.complete(system_prompt, turns)
 
-        if reply and (
-            self._is_recent_bot_repeat(reply) or self._is_recent_opener_repeat(reply)
-        ):
-            LOGGER.info(
-                "Idle-Nachricht übersprungen (Wiederholung/ähnlicher Opener): %s", reply
-            )
+        if reply and (self._is_recent_bot_repeat(reply) or self._is_recent_opener_repeat(reply)):
+            LOGGER.info("Idle-Nachricht übersprungen (Wiederholung/ähnlicher Opener): %s", reply)
             self._last_activity = time.monotonic()
             self._idle_messages_since_human += 1
             return
@@ -2170,9 +2161,7 @@ def _select_llm_backend() -> None:
         "gemma-4-26b-a4b",
     ):
         model = (
-            "gemma-4-26b-a4b"
-            if configured in ("3", "gemma-4-26b-a4b")
-            else online_model_override
+            "gemma-4-26b-a4b" if configured in ("3", "gemma-4-26b-a4b") else online_model_override
         )
         settings.apply_llm_backend(configured, online_model=model)
         LOGGER.info("LLM-Profil: %s", settings.llm_backend_label)
@@ -2200,8 +2189,15 @@ def _select_llm_backend() -> None:
             settings.apply_llm_backend("local")
             break
         if choice in (
-            "2", "3", "o", "online", "google", "gemini", "gemma",
-            "gemma-4-31b-it", "gemma-4-26b-a4b",
+            "2",
+            "3",
+            "o",
+            "online",
+            "google",
+            "gemini",
+            "gemma",
+            "gemma-4-31b-it",
+            "gemma-4-26b-a4b",
         ):
             if not (settings.google_api_key or settings.llm_api_key):
                 key = getpass.getpass(

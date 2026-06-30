@@ -765,7 +765,7 @@ def test_record_interaction_increments_and_persists(tmp_path) -> None:
         (2, 5, 7, True),
         (2, 5, 12, True),
         (0, 5, 5, False),  # komplett deaktiviert
-        (2, 0, 2, True),   # nur die erste Zusammenfassung
+        (2, 0, 2, True),  # nur die erste Zusammenfassung
     ],
 )
 def test_should_summarize(
@@ -840,9 +840,7 @@ def test_apply_llm_backend_online_with_a4b_override(monkeypatch: pytest.MonkeyPa
     assert fresh.llm_use_system_role is False  # Gemma kennt keine System-Rolle
 
 
-def test_apply_llm_backend_menu_shortcut_3_picks_a4b(
-    monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_apply_llm_backend_menu_shortcut_3_picks_a4b(monkeypatch: pytest.MonkeyPatch) -> None:
     fresh = Settings()
     monkeypatch.setattr(fresh, "google_api_key", "test-key")
 
@@ -851,9 +849,7 @@ def test_apply_llm_backend_menu_shortcut_3_picks_a4b(
     assert fresh.llm_model == "gemma-4-26b-a4b"
 
 
-def test_idle_next_delay_is_adaptive(
-    bot: PandaBot, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_idle_next_delay_is_adaptive(bot: PandaBot, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "idle_threshold", 900)
     monkeypatch.setattr(settings, "idle_jitter", 90)
     monkeypatch.setattr(settings, "idle_max_solo_messages", 1)
@@ -865,7 +861,9 @@ def test_idle_next_delay_is_adaptive(
     assert 900.0 <= delay <= 990.0
 
 
-def test_idle_next_delay_floors_to_one_second(bot: PandaBot, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_idle_next_delay_floors_to_one_second(
+    bot: PandaBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(settings, "idle_threshold", 10)
     monkeypatch.setattr(settings, "idle_jitter", 0)
     monkeypatch.setattr(settings, "idle_max_solo_messages", 1)

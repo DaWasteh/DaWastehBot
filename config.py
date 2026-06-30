@@ -176,8 +176,15 @@ class Settings:
             return
 
         if normalized in (
-            "2", "3", "o", "online", "google", "gemini", "gemma",
-            "gemma-4-31b-it", "gemma-4-26b-a4b",
+            "2",
+            "3",
+            "o",
+            "online",
+            "google",
+            "gemini",
+            "gemma",
+            "gemma-4-31b-it",
+            "gemma-4-26b-a4b",
         ):
             api_key = self.google_api_key or self.llm_api_key
             if not api_key:
