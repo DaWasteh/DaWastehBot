@@ -43,6 +43,15 @@ def _first_env(*names: str) -> str | None:
     return None
 
 
+def _google_native_base_url(url: str) -> str:
+    """Migrate old OpenAI-compatible Google URLs to the native API base."""
+    clean = url.strip().rstrip("/")
+    for suffix in ("/openai/chat/completions", "/openai"):
+        if clean.endswith(suffix):
+            return clean[: -len(suffix)]
+    return clean
+
+
 @dataclass
 class Settings:
     # --- Twitch / App ---
@@ -80,31 +89,36 @@ class Settings:
     llm_send_llama_extras: bool = field(
         default_factory=lambda: _env_bool("LLM_SEND_LLAMA_EXTRAS", True)
     )
-    # System-Rolle nutzen? Gemma-Modelle (lokal wie über die Gemini API) kennen
-    # keine echte System-Rolle bzw. ignorieren sie gern; dann bettet der Bot
-    # die Anweisungen automatisch in die erste User-Nachricht ein. Das
-    # Online-Profil schaltet das standardmäßig ab (per Env übersteuerbar).
+    # System-Rolle nutzen? Gemma 4 via native generateContent unterstützt
+    # System Instructions; lokal oder über ältere Endpunkte ist das nicht
+    # garantiert.  Das Online-Profil belässt es per Default auf true (Gemma 4
+    # kann System Instructions), per Env übersteuerbar.
     llm_use_system_role: bool = field(
         default_factory=lambda: _env_bool("LLM_USE_SYSTEM_ROLE", True)
     )
+    # Transport: "openai" (chat/completions) oder "google_native" (generateContent).
+    # Das Online-Profil setzt automatisch "google_native".
+    llm_transport: str = field(default_factory=lambda: os.getenv("LLM_TRANSPORT", "openai"))
     llm_max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "80")))
     llm_timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "20")))
 
     # --- Google/Gemma Online-Profil ---
+    # Basis-URL für den nativen generateContent-Transport.  Der Bot hängt
+    # /models/{model}:generateContent selbst an.
     google_llm_url: str = field(
         default_factory=lambda: os.getenv(
             "GOOGLE_LLM_SERVER_URL",
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            "https://generativelanguage.googleapis.com/v1beta",
         )
     )
     google_llm_model: str = field(
         default_factory=lambda: os.getenv("GOOGLE_LLM_MODEL", "gemma-4-31b-it")
     )
     google_llm_max_tokens: int = field(
-        default_factory=lambda: int(os.getenv("GOOGLE_LLM_MAX_TOKENS", "200"))
+        default_factory=lambda: int(os.getenv("GOOGLE_LLM_MAX_TOKENS", "512"))
     )
     google_llm_timeout: float = field(
-        default_factory=lambda: float(os.getenv("GOOGLE_LLM_TIMEOUT", "30"))
+        default_factory=lambda: float(os.getenv("GOOGLE_LLM_TIMEOUT", "45"))
     )
     google_api_key: str | None = field(
         default_factory=lambda: _first_env("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_LLM_API_KEY")
@@ -149,17 +163,23 @@ class Settings:
     )
 
     def _normalized_google_model(self) -> str:
-        """Normalisiert häufige Vertipper/Aliase für das Google-Online-Profil."""
+        """Normalisiert häufige Vertipper/Aliase für das Google-Online-Profil.
+
+        Korrekte IDs laut Google-Doku (Stand 2026-07-02):
+        ``gemma-4-31b-it`` und ``gemma-4-26b-a4b-it``.
+        """
         model = self.google_llm_model.strip()
         # Die API-Modell-ID heißt Gemma, auch wenn sie über die Gemini API läuft.
-        # "a4b" = aktive Parameter bei MoE-Varianten (z. B. gemma-4-26b-a4b).
+        # "a4b" = aktive Parameter bei MoE-Varianten (z. B. gemma-4-26b-a4b-it).
         aliases = {
             "gemini-4-31b-it": "gemma-4-31b-it",
             "google/gemma-4-31b-it": "gemma-4-31b-it",
-            "gemini-4-26b-a4b": "gemma-4-26b-a4b",
-            "google/gemma-4-26b-a4b": "gemma-4-26b-a4b",
-            "gemma-4-26b-it-a4b": "gemma-4-26b-a4b",
-            "gemma-4-26b-a4b-it": "gemma-4-26b-a4b",
+            "gemini-4-26b-a4b": "gemma-4-26b-a4b-it",
+            "google/gemma-4-26b-a4b": "gemma-4-26b-a4b-it",
+            "gemma-4-26b-a4b": "gemma-4-26b-a4b-it",
+            "gemma-4-26b-it-a4b": "gemma-4-26b-a4b-it",
+            "gemma-4-26b-a4b-it-a4b": "gemma-4-26b-a4b-it",
+            "google/gemma-4-26b-a4b-it": "gemma-4-26b-a4b-it",
         }
         return aliases.get(model.lower(), model)
 
@@ -185,6 +205,7 @@ class Settings:
             "gemma",
             "gemma-4-31b-it",
             "gemma-4-26b-a4b",
+            "gemma-4-26b-a4b-it",
         ):
             api_key = self.google_api_key or self.llm_api_key
             if not api_key:
@@ -198,21 +219,27 @@ class Settings:
             # Menu-Shortcut „3"/Alternative -> MoE-Variante, außer online_model
             # wurde schon anders gesetzt.
             elif normalized == "3":
-                self.google_llm_model = "gemma-4-26b-a4b"
+                self.google_llm_model = "gemma-4-26b-a4b-it"
             self.llm_backend = "online"
             self.google_llm_model = self._normalized_google_model()
             self.llm_backend_label = f"Google Gemini API ({self.google_llm_model})"
-            self.llm_url = self.google_llm_url
+            # Existing .env files may still contain the former OpenAI shim URL.
+            # Migrate it automatically instead of appending a broken native path.
+            self.llm_url = _google_native_base_url(self.google_llm_url)
             self.llm_model = self.google_llm_model
             self.llm_api_key = api_key
-            self.llm_max_tokens = self.google_llm_max_tokens
+            # Gemma 4 can spend a few hundred tokens on native thought parts;
+            # old .env files often still contain 120/200 and would truncate the
+            # answer before the first visible text part.
+            self.llm_max_tokens = max(512, self.google_llm_max_tokens)
             self.llm_timeout = self.google_llm_timeout
             self.llm_send_repeat_penalty = False
             self.llm_send_llama_extras = False
-            # Gemma kennt keine System-Rolle: Anweisungen wandern in die erste
-            # User-Nachricht. Mit LLM_USE_SYSTEM_ROLE=true erzwingbar, falls das
-            # eigene Backend System-Messages doch sauber unterstützt.
-            self.llm_use_system_role = _env_bool("LLM_USE_SYSTEM_ROLE", False)
+            # Gemma 4 unterstützt System Instructions via generateContent.
+            self.llm_use_system_role = _env_bool("LLM_USE_SYSTEM_ROLE", True)
+            # Google nutzt den nativen generateContent-Transport, nicht die
+            # OpenAI-Kompatibilitätsschicht (die beim MoE-Modell HTTP 500 liefert).
+            self.llm_transport = "google_native"
             return
 
         raise ValueError("LLM_BACKEND muss 'ask', 'local' oder 'online' sein.")

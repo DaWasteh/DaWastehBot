@@ -1,0 +1,9 @@
+# Windows-Batchdateien MUSS CRLF haben, sonst frisst cmd.exe das erste
+# Zeichen jeder Zeile (set -> et, REM -> EM, cd -> d, if -> f).
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Unix-Shell und Python bleiben LF.
+*.sh    text eol=lf
+*.py    text eol=lf

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import getpass
 import logging
+import os
 import random
 import re
 import sys
@@ -390,8 +391,38 @@ def safe_stream_title(title: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-#  LLM-Client (OpenAI-kompatibel)
+#  LLM-Client (OpenAI-kompatibel / Google native)
 # --------------------------------------------------------------------------- #
+def _extract_google_text(data: dict[str, Any]) -> str | None:
+    """Extract final answer text from a Google ``generateContent`` response.
+
+    Gemma 4 thinking models emit thought summaries as separate parts with
+    ``"thought": true``.  Only non-thought text parts are concatenated.
+    """
+    try:
+        candidates = data["candidates"]
+    except (KeyError, TypeError):
+        return None
+    if not candidates:
+        return None
+    parts = []
+    try:
+        raw_parts = candidates[0]["content"]["parts"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    for part in raw_parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("thought"):
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text)
+    if not parts:
+        return None
+    return "\n".join(parts)
+
+
 class LLMClient:
     """Kapselt die Kommunikation mit dem ausgewählten LLM-Backend.
 
@@ -402,6 +433,13 @@ class LLMClient:
 
     def __init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None
+        # Track the endpoint/timeout the current session was built for so that
+        # a profile switch (different endpoint or timeout) forces a clean
+        # re-open with the new parameters.
+        self._session_url: str = ""
+        self._session_timeout: float = 0.0
+        # Control-file mtime for runtime profile switching (GUI mode).
+        self._last_control_mtime_ns: int = 0
         # Stop-Strings verhindern, dass kleine Modelle sich selbst als weitere
         # Chatter halluzinieren und einen ganzen Fake-Dialog schreiben.
         self._stop = [
@@ -413,9 +451,18 @@ class LLMClient:
         ]
 
     async def open(self) -> None:
-        if self._session is None or self._session.closed:
+        if (
+            self._session is None
+            or self._session.closed
+            or self._session_url != settings.llm_url
+            or self._session_timeout != settings.llm_timeout
+        ):
+            if self._session and not self._session.closed:
+                await self._session.close()
             timeout = aiohttp.ClientTimeout(total=settings.llm_timeout)
             self._session = aiohttp.ClientSession(timeout=timeout)
+            self._session_url = settings.llm_url
+            self._session_timeout = settings.llm_timeout
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
@@ -437,13 +484,79 @@ class LLMClient:
         zurück, wenn der Server nicht erreichbar ist oder eine unbrauchbare
         Antwort liefert. Der Aufrufer entscheidet dann, ob er schweigt.
         """
-        await self.open()
-        assert self._session is not None
+        # --- Runtime profile switch (GUI control file) ---
+        self._maybe_apply_control_file()
 
         messages = self._build_messages(
             system_prompt, list(turns), final_label=final_label, allow_prefill=allow_prefill
         )
 
+        # CLI subscriptions do not need an aiohttp session.
+        if settings.llm_transport in (
+            "claude_cli",
+            "codex_cli",
+            "gemini_cli",
+            "copilot_cli",
+        ):
+            return await self._complete_cli(settings.llm_transport, system_prompt, turns)
+
+        await self.open()
+        assert self._session is not None
+        if settings.llm_transport == "google_native":
+            return await self._complete_google_native(messages)
+        return await self._complete_openai(messages)
+
+    def _maybe_apply_control_file(self) -> None:
+        """Check the GUI control file for a profile switch (no-op if absent).
+
+        Only active when ``PANDABOT_GUI_CONTROL=1`` is set.  Reads the control
+        file's mtime to avoid re-reading on every request when nothing changed.
+        """
+        if os.getenv("PANDABOT_GUI_CONTROL") != "1":
+            return
+        try:
+            from llm_profiles import DEFAULT_CONTROL_PATH, read_control_file
+
+            path = DEFAULT_CONTROL_PATH
+            if not path.exists():
+                return
+            mtime_ns = path.stat().st_mtime_ns
+            if mtime_ns <= self._last_control_mtime_ns:
+                return
+            self._last_control_mtime_ns = mtime_ns
+            data = read_control_file(path)
+            if not data:
+                return
+        except OSError:
+            return
+
+        self._apply_control_data(data)
+
+    def _apply_control_data(self, data: dict[str, Any]) -> None:
+        """Apply a control-file dict to the global ``settings``."""
+        key_map = {
+            "endpoint": "llm_url",
+            "model": "llm_model",
+            "api_key": "llm_api_key",
+            "max_tokens": "llm_max_tokens",
+            "temperature": "llm_temperature",
+            "top_p": "llm_top_p",
+            "timeout": "llm_timeout",
+            "use_system_role": "llm_use_system_role",
+            "send_repeat_penalty": "llm_send_repeat_penalty",
+            "send_llama_extras": "llm_send_llama_extras",
+            "repeat_penalty": "llm_repeat_penalty",
+            "transport": "llm_transport",
+        }
+        for src, dst in key_map.items():
+            if src in data and data[src] is not None:
+                setattr(settings, dst, data[src])
+        if data.get("profile_name"):
+            settings.llm_backend_label = data["profile_name"]
+            LOGGER.info("LLM-Profil gewechselt: %s", data["profile_name"])
+
+    async def _complete_openai(self, messages: list[dict[str, str]]) -> str | None:
+        """OpenAI-compatible chat/completions transport."""
         payload: dict[str, Any] = {
             "model": settings.llm_model,
             "messages": messages,
@@ -454,14 +567,9 @@ class LLMClient:
             "stream": False,
         }
 
-        # llama.cpp / Thinking-Modelle: MiniCPM/Qwen-artige Modelle liefern
-        # sonst oft nur reasoning_content und ein leeres message.content.
-        # Online-Backends wie Google/Gemma kennen diese Extras nicht.
         if settings.llm_send_llama_extras:
             payload["chat_template_kwargs"] = {"enable_thinking": False, "thinking": False}
             payload["reasoning_budget"] = 0
-        # llama.cpp-spezifisch, hilft kleinen Modellen gegen Wiederholungen.
-        # Nicht Teil der OpenAI-Spec, daher optional (siehe Config).
         if settings.llm_send_repeat_penalty:
             payload["repeat_penalty"] = settings.llm_repeat_penalty
 
@@ -495,6 +603,128 @@ class LLMClient:
             return None
         if self._looks_like_reasoning(sanitized):
             LOGGER.warning("LLM-Antwort sah nach Reasoning aus und wurde blockiert: %r", sanitized)
+            return None
+        return sanitized
+
+    async def _complete_google_native(self, messages: list[dict[str, str]]) -> str | None:
+        """Native Google Gemini ``generateContent`` transport.
+
+        Used for Google/Gemma models.  The OpenAI-compatibility shim returns
+        HTTP 500 for the MoE variant, so we call the native endpoint directly.
+        Thought parts (``thought: true``) are filtered out.
+        """
+        model = settings.llm_model
+        if model.startswith("models/"):
+            model = model[len("models/") :]
+        base = settings.llm_url.rstrip("/")
+        url = f"{base}/models/{model}:generateContent"
+
+        # Separate system messages → systemInstruction; user/assistant → contents.
+        system_parts: list[dict[str, str]] = []
+        contents: list[dict[str, Any]] = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_parts.append({"text": msg["content"]})
+            else:
+                role = "model" if msg["role"] == "assistant" else "user"
+                contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+        if not contents:
+            contents = [{"role": "user", "parts": [{"text": "(Sag etwas Kurzes.)"}]}]
+
+        body: dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": {
+                "maxOutputTokens": settings.llm_max_tokens,
+                "temperature": settings.llm_temperature,
+                "topP": settings.llm_top_p,
+            },
+        }
+        if system_parts:
+            body["systemInstruction"] = {"parts": system_parts}
+
+        headers = {
+            "x-goog-api-key": settings.llm_api_key or "",
+            "Content-Type": "application/json",
+        }
+
+        data: dict[str, Any] | None = None
+        for attempt in range(3):
+            try:
+                async with self._session.post(url, json=body, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        break
+                    response_body = await resp.text()
+                    transient = resp.status in {429, 500, 502, 503, 504}
+                    if transient and attempt < 2:
+                        LOGGER.warning(
+                            "Google generateContent HTTP %s (Versuch %s/3), retry: %s",
+                            resp.status,
+                            attempt + 1,
+                            response_body[:160],
+                        )
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+                    LOGGER.warning(
+                        "Google generateContent HTTP %s: %s", resp.status, response_body[:200]
+                    )
+                    return None
+            except (aiohttp.ClientError, TimeoutError) as exc:
+                LOGGER.warning("Google generateContent nicht erreichbar: %s", exc)
+                return None
+            except Exception:  # noqa: BLE001 - defensiv, Bot soll nie crashen
+                LOGGER.exception("Unerwarteter Fehler beim Google generateContent-Aufruf")
+                return None
+        if data is None:
+            return None
+
+        reply = _extract_google_text(data)
+        if reply is None:
+            LOGGER.warning("Google generateContent: keine Text-Parts gefunden: %r", data)
+            return None
+
+        sanitized = self._sanitize(reply)
+        if not sanitized:
+            LOGGER.warning("Google generateContent-Rohantwort war leer/unbrauchbar: %r", reply)
+            return None
+        if self._looks_like_reasoning(sanitized):
+            LOGGER.warning(
+                "Google generateContent-Antwort sah nach Reasoning aus und wurde blockiert: %r",
+                sanitized,
+            )
+            return None
+        return sanitized
+
+    async def _complete_cli(
+        self,
+        transport: str,
+        system_prompt: str,
+        turns: Sequence[tuple[str, str]],
+    ) -> str | None:
+        """CLI-backend transport (Claude/Codex/Gemini/Copilot CLIs).
+
+        Packs system prompt + turns into a single text prompt, runs the
+        official CLI headless/read-only, and sanitizes the response.
+        Returns ``None`` if the CLI is missing or fails.
+        """
+        from cli_backends import cli_complete
+
+        raw = await cli_complete(
+            transport,
+            settings.llm_model,
+            system_prompt,
+            turns,
+            timeout=settings.llm_timeout,
+        )
+        if raw is None:
+            LOGGER.warning("CLI-Backend (%s) lieferte keine Antwort.", transport)
+            return None
+        sanitized = self._sanitize(raw)
+        if not sanitized:
+            LOGGER.warning("CLI-Rohantwort war leer/unbrauchbar: %r", raw)
+            return None
+        if self._looks_like_reasoning(sanitized):
+            LOGGER.warning("CLI-Antwort sah nach Reasoning aus und wurde blockiert: %r", sanitized)
             return None
         return sanitized
 
@@ -2142,7 +2372,7 @@ def _select_llm_backend() -> None:
     online_model_override: str | None = None
     if configured in ("online-a4b", "gemma-a4b", "a4b"):
         configured = "online"
-        online_model_override = "gemma-4-26b-a4b"
+        online_model_override = "gemma-4-26b-a4b-it"
     if configured in (
         "1",
         "l",
@@ -2158,10 +2388,12 @@ def _select_llm_backend() -> None:
         "gemini",
         "gemma",
         "gemma-4-31b-it",
-        "gemma-4-26b-a4b",
+        "gemma-4-26b-a4b-it",
     ):
         model = (
-            "gemma-4-26b-a4b" if configured in ("3", "gemma-4-26b-a4b") else online_model_override
+            "gemma-4-26b-a4b-it"
+            if configured in ("3", "gemma-4-26b-a4b-it")
+            else online_model_override
         )
         settings.apply_llm_backend(configured, online_model=model)
         LOGGER.info("LLM-Profil: %s", settings.llm_backend_label)
@@ -2180,7 +2412,7 @@ def _select_llm_backend() -> None:
         "\nPandaBot LLM auswählen:\n"
         f"  [1] Lokal: llama-server ({settings.llm_model} @ {settings.llm_url})\n"
         "  [2] Online: Google Gemma 4 31B IT (gemma-4-31b-it)\n"
-        "  [3] Online: Google Gemma 4 26B A4B / MoE (gemma-4-26b-a4b)\n"
+        "  [3] Online: Google Gemma 4 26B A4B / MoE (gemma-4-26b-a4b-it)\n"
         "Auswahl [1/2/3, Enter=1]: "
     )
     while True:
@@ -2197,7 +2429,7 @@ def _select_llm_backend() -> None:
             "gemini",
             "gemma",
             "gemma-4-31b-it",
-            "gemma-4-26b-a4b",
+            "gemma-4-26b-a4b-it",
         ):
             if not (settings.google_api_key or settings.llm_api_key):
                 key = getpass.getpass(
@@ -2208,7 +2440,7 @@ def _select_llm_backend() -> None:
                     settings.apply_llm_backend("local")
                     break
                 settings.google_api_key = key
-            online_model = "gemma-4-26b-a4b" if choice in ("3", "gemma-4-26b-a4b") else None
+            online_model = "gemma-4-26b-a4b-it" if choice in ("3", "gemma-4-26b-a4b-it") else None
             settings.apply_llm_backend("online", online_model=online_model)
             break
         print("Bitte 1/lokal, 2 oder 3/online eingeben.")

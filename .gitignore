@@ -10,6 +10,13 @@ tokens.db
 user_memories/
 uservault/
 
+# LLM-Profile (enthalten API-Keys) und Control-Datei
+llm_profiles.json
+.pandabot_llm_control.json
+
+# GUI-eigene venv
+.venv-gui/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -24,3 +31,10 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+.venv/
+
+# Temp/Build artifacts
+*.tmp
+
+# Subagent artifacts (nicht Teil des Projekts)
+.pi-subagents/

@@ -17,7 +17,7 @@ import pytest
 if TYPE_CHECKING:
     import twitchio
 
-from config import Settings, settings
+from config import Settings, _google_native_base_url, settings
 from pandabot import (
     LANGUAGE_DEFAULT,
     LANGUAGE_ENGLISH,
@@ -507,6 +507,15 @@ def test_respond_uses_opinion_fallback_when_gemma_returns_only_thoughts(
     assert llm.calls == 2
 
 
+def test_google_native_url_migrates_old_openai_shim() -> None:
+    assert (
+        _google_native_base_url(
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        )
+        == "https://generativelanguage.googleapis.com/v1beta"
+    )
+
+
 def test_apply_online_llm_backend_uses_google_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "GOOGLE_LLM_MODEL",
@@ -526,9 +535,10 @@ def test_apply_online_llm_backend_uses_google_profile(monkeypatch: pytest.Monkey
     assert settings_obj.llm_api_key == "test-key"
     assert settings_obj.llm_send_repeat_penalty is False
     assert settings_obj.llm_send_llama_extras is False
-    assert settings_obj.llm_use_system_role is False
-    assert settings_obj.llm_max_tokens == 200
-    assert settings_obj.llm_timeout == 30
+    assert settings_obj.llm_use_system_role is True  # Gemma 4 supports System Instructions
+    assert settings_obj.llm_max_tokens == 512
+    assert settings_obj.llm_timeout == 45
+    assert settings_obj.llm_transport == "google_native"
 
 
 def test_apply_online_llm_backend_normalizes_common_gemini_typo() -> None:
@@ -824,7 +834,7 @@ def test_normalized_google_model_handles_a4b_aliases() -> None:
         "gemma-4-26b-a4b-it",
     ):
         fresh.google_llm_model = alias
-        assert fresh._normalized_google_model() == "gemma-4-26b-a4b", alias
+        assert fresh._normalized_google_model() == "gemma-4-26b-a4b-it", alias
 
 
 def test_apply_llm_backend_online_with_a4b_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -834,10 +844,11 @@ def test_apply_llm_backend_online_with_a4b_override(monkeypatch: pytest.MonkeyPa
     fresh.apply_llm_backend("online", online_model="gemma-4-26b-a4b")
 
     assert fresh.llm_backend == "online"
-    assert fresh.llm_model == "gemma-4-26b-a4b"
+    assert fresh.llm_model == "gemma-4-26b-a4b-it"  # normalisiert zur korrekten API-ID
     assert fresh.llm_send_repeat_penalty is False
     assert fresh.llm_send_llama_extras is False
-    assert fresh.llm_use_system_role is False  # Gemma kennt keine System-Rolle
+    assert fresh.llm_use_system_role is True  # Gemma 4 supports System Instructions
+    assert fresh.llm_transport == "google_native"
 
 
 def test_apply_llm_backend_menu_shortcut_3_picks_a4b(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -846,7 +857,7 @@ def test_apply_llm_backend_menu_shortcut_3_picks_a4b(monkeypatch: pytest.MonkeyP
 
     fresh.apply_llm_backend("3")
 
-    assert fresh.llm_model == "gemma-4-26b-a4b"
+    assert fresh.llm_model == "gemma-4-26b-a4b-it"  # korrekte API-ID mit -it-Suffix
 
 
 def test_idle_next_delay_is_adaptive(bot: PandaBot, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -946,3 +957,109 @@ def test_event_message_increments_interaction_count(
 
     memory = (tmp_path / "321.md").read_text(encoding="utf-8")
     assert "- Interaktionen: 1" in memory
+
+
+# --------------------------------------------------------------------------- #
+#  Google native generateContent: Text-Extraktion und Thought-Filterung      #
+# --------------------------------------------------------------------------- #
+from pandabot import _extract_google_text  # noqa: E402
+
+
+def test_extract_google_text_simple() -> None:
+    """Ein einzelner Text-Part ohne Thought."""
+    data = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [{"text": "Servus aus dem Chat!"}],
+                    "role": "model",
+                }
+            }
+        ]
+    }
+    assert _extract_google_text(data) == "Servus aus dem Chat!"
+
+
+def test_extract_google_text_filters_thought_parts() -> None:
+    """Thought-Parts (thought: true) werden verworfen."""
+    data = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": "* Input: test. * Antwort: Hallo.",
+                            "thought": True,
+                        },
+                        {"text": "Hallo!"},
+                    ],
+                    "role": "model",
+                }
+            }
+        ]
+    }
+    assert _extract_google_text(data) == "Hallo!"
+
+
+def test_extract_google_text_multiple_text_parts() -> None:
+    data = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [{"text": "Zeile 1"}, {"text": "Zeile 2"}],
+                    "role": "model",
+                }
+            }
+        ]
+    }
+    assert _extract_google_text(data) == "Zeile 1\nZeile 2"
+
+
+def test_extract_google_text_returns_none_for_thought_only() -> None:
+    data = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [{"text": "internal reasoning", "thought": True}],
+                    "role": "model",
+                }
+            }
+        ]
+    }
+    assert _extract_google_text(data) is None
+
+
+def test_extract_google_text_returns_none_for_missing_candidates() -> None:
+    assert _extract_google_text({}) is None
+    assert _extract_google_text({"candidates": []}) is None
+
+
+# --------------------------------------------------------------------------- #
+#  Control file: runtime profile switching                                   #
+# --------------------------------------------------------------------------- #
+def test_apply_control_data_switches_transport(client: LLMClient) -> None:
+    """The LLM client applies control-file data to settings."""
+    assert settings.llm_transport == "openai"  # default
+
+    client._apply_control_data(
+        {
+            "profile_name": "Test-Google",
+            "transport": "google_native",
+            "endpoint": "https://example.com/v1beta",
+            "model": "gemma-4-31b-it",
+            "api_key": "secret",
+            "max_tokens": 512,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "timeout": 45.0,
+            "use_system_role": True,
+        }
+    )
+
+    assert settings.llm_transport == "google_native"
+    assert settings.llm_model == "gemma-4-31b-it"
+    assert settings.llm_api_key == "secret"
+    assert settings.llm_max_tokens == 512
+
+    # Restore
+    settings.llm_transport = "openai"

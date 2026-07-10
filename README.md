@@ -126,7 +126,7 @@ Beim Start fragt PandaBot standardmäßig:
 ```text
 [1] Lokal: llama-server
 [2] Online: Google Gemma 4 31B IT (gemma-4-31b-it)
-[3] Online: Google Gemma 4 26B A4B / MoE (gemma-4-26b-a4b)
+[3] Online: Google Gemma 4 26B A4B / MoE (gemma-4-26b-a4b-it)
 ```
 
 Mit `LLM_BACKEND=local`, `LLM_BACKEND=online` (Default-Modell aus `.env`) oder
@@ -141,20 +141,23 @@ GOOGLE_LLM_MODEL=gemma-4-31b-it
 
 Wichtig: Die API-Modell-ID heißt `gemma-4-31b-it`, auch wenn sie über die Gemini API läuft. Falls du versehentlich `gemini-4-31b-it` einträgst, normalisiert PandaBot das beim Start automatisch auf `gemma-4-31b-it`.
 
-Der Online-Modus nutzt den OpenAI-kompatiblen Gemini-Endpunkt und schaltet
-llama.cpp-spezifische Felder wie `repeat_penalty` automatisch ab. Wenn du VRAM freihalten willst, setze einfach `LLM_BACKEND=online`.
+Der Online-Modus nutzt den **nativen `generateContent`-Endpunkt** (nicht den
+OpenAI-Kompatibilitäts-Shim, der für die MoE-Variante `gemma-4-26b-a4b-it`
+aktuell HTTP 500 liefert) und schaltet llama.cpp-spezifische Felder wie
+`repeat_penalty` automatisch ab. Wenn du VRAM freihalten willst, setze einfach `LLM_BACKEND=online`.
 
 **Gemma-Besonderheiten, die PandaBot automatisch behandelt:**
 
-- Gemma kennt keine echte System-Rolle. Im Online-Profil bettet PandaBot die
-  Anweisungen deshalb in die erste User-Nachricht ein (`LLM_USE_SYSTEM_ROLE`
-  steht online automatisch auf `false`, lokal bleibt es bei `true`).
+- Gemma 4 unterstützt System Instructions über den nativen `generateContent`-
+  Endpunkt. Der System-Prompt wird als `systemInstruction` geschickt.
 - Gemma verlangt strikt abwechselnde user/assistant-Turns. PandaBot legt
   aufeinanderfolgende Chatter-Nachrichten zusammen und sorgt dafür, dass die
   Konversation mit einer User-Nachricht beginnt.
 - Gemma schreibt gern interne `<thought>`-Notizen vor der Antwort. PandaBot
-  filtert sie heraus; `GOOGLE_LLM_MAX_TOKENS` ist dafür etwas großzügiger
-  voreingestellt, damit nach den Gedanken noch echte Antwort übrig bleibt.
+  filtert sie heraus (sowohl `<think>` als auch `<thought>`-Tags sowie die
+  nativen `thought: true`-Parts von `generateContent`);
+  `GOOGLE_LLM_MAX_TOKENS` ist dafür großzügig voreingestellt, damit nach den
+  Gedanken noch echte Antwort übrig bleibt.
 - Der Stream-Titel wird vor jedem Prompt von Tags, Emotes und `!commands`
   bereinigt, damit das Modell ihn nicht wörtlich in den Chat kopiert.
 
@@ -172,13 +175,117 @@ llama-server -m /pfad/zu/deinem-modell.gguf --port 1235 -c 4096
 > dreh `LLM_REPEAT_PENALTY` in der `.env` schrittweise hoch (z. B. auf `1.2`).
 > Werden sie zu wirr, senke `LLM_TEMPERATURE`.
 
-> **Modell-agnostisch:** Der Bot spricht nur die OpenAI-kompatible
-> `chat/completions`-Schnittstelle, das Modell ist also frei wählbar – ob
-> MiniCPM, ein LFM-2.5 oder ein größeres Modell, am Code ändert sich nichts,
-> nur `LLM_MODEL` bzw. der mit `llama-server` geladene Checkpoint. Wechselst du
-> das **Backend** (z. B. auf vLLM), kennt dieses den llama.cpp-eigenen
+> **Modell-agnostisch:** Lokal und bei den meisten API-Anbietern nutzt der Bot
+> die OpenAI-kompatible `chat/completions`-Schnittstelle; Google läuft wegen
+> Gemma 4 nativ über `generateContent`, Abo-Profile über offizielle CLIs.
+> Beim lokalen Server ist der Checkpoint frei wählbar. Wechselst du das
+> **Backend** (z. B. auf vLLM), kennt dieses den llama.cpp-eigenen
 > `repeat_penalty` evtl. nicht – setze dann `LLM_SEND_REPEAT_PENALTY=false`,
 > damit der Parameter weggelassen wird.
+
+## LLM Control GUI (`pandabot_gui.py`)
+
+Eine plattformübergreifende (Windows/Linux) tkinter-GUI zur Verwaltung aller
+LLM-Backends, On-the-fly-Modellwechsel, Abo/CLI-Logins und SSH-Tunneln.
+
+Starten:
+
+```bash
+# Windows
+start_gui.bat
+# Linux/macOS
+./start_gui.sh
+# oder direkt
+python pandabot_gui.py
+```
+
+Die GUI nutzt tkinter plus das moderne plattformübergreifende Sun-Valley-Theme
+`sv-ttk` (wird vom Launcher bei Bedarf aus `requirements-gui.txt` installiert).
+Auf manchen Linux-Distributionen zusätzlich: `sudo apt install python3-tk`.
+Die Launcher bevorzugen
+für die GUI `.venv-gui`, danach `.venv`; der Bot selbst wird weiterhin mit
+seiner Repo-`.venv` gestartet. Optional getrennt anlegen:
+
+```bash
+# Windows
+py -3.12 -m venv .venv-gui
+.venv-gui\Scripts\python -m pip install -r requirements-gui.txt
+# Linux
+python3 -m venv .venv-gui
+.venv-gui/bin/python -m pip install -r requirements-gui.txt
+```
+
+### API-Profile
+
+- Provider-Presets: Local llama.cpp, Google native, OpenAI, OpenRouter, Groq,
+  Mistral, xAI, Custom OpenAI-compatible.
+- Pro Profil: Provider, maskierter API-Key, Endpoint, Modell-Dropdown
+  (editierbar), Temperatur/TopP/MaxTokens/Timeout/Systemrolle.
+- **„Modelle laden“** ruft pro API-Key `/models` ab und befüllt das Dropdown.
+  Bei Google native werden nur `generateContent`-fähige Modelle gezeigt.
+- API-Keys werden in einer lokalen, atomar geschriebenen `llm_profiles.json`
+  gespeichert (gitignored, best-effort `0600`). `.env`-Keys sind Fallback.
+
+### On-the-fly Modellwechsel
+
+- **„Profil aktivieren“** schreibt eine atomare Control-Datei
+  (`.pandabot_llm_control.json`).
+- Der Bot läuft mit `PANDABOT_GUI_CONTROL=1` und übernimmt das Profil vor
+  dem nächsten LLM-Request.
+- Die aiohttp-Session wird bei Endpoint/Timeout-Wechsel erneuert.
+
+### Bot starten/stoppen
+
+- Die GUI startet den Bot im Repo-`.venv` (bevorzugt) oder mit dem
+  System-Python.
+- stdout/stderr werden live im „Bot“-Tab angezeigt.
+- Sauberer Shutdown: Windows `CTRL_BREAK_EVENT`, POSIX `SIGTERM` → `SIGKILL`.
+
+### Abo-Modelle via offizieller CLIs
+
+Die GUI bietet pro Anbieter **Installieren**, **Login**, ein editierbares
+Modell-Dropdown und **Aktivieren**. **„Alle offiziellen CLIs installieren“**
+installiert mit Node.js 22+/npm ausschließlich die offiziellen Pakete:
+`@anthropic-ai/claude-code`, `@openai/codex`, `@google/gemini-cli` und
+`@github/copilot`. Danach öffnet **Login** den jeweiligen offiziellen
+Browser-/OAuth-Flow. Bei Codex lädt **„Modelle laden“** den Modellkatalog
+des angemeldeten Kontos (`codex debug models`) dynamisch. Bei CLIs ohne
+offiziellen List-Models-Befehl bleiben dokumentierte Aliase/Vorschläge sowie
+manuelle Eingaben verfügbar.
+
+Die Login-Buttons öffnen ein Terminal mit dem offiziellen CLI:
+
+| CLI | Login | Headless-Aufruf (read-only) |
+|-----|-------|-----------------------------|
+| Claude Code (`claude`) | `/login` in interaktiver Session | `--bare -p --tools "" --no-session-persistence` |
+| OpenAI Codex (`codex`) | `codex login` | `exec --sandbox read-only --json` |
+| Gemini CLI (`gemini`) | „Sign in with Google“ | `-p --output-format json` |
+| Copilot CLI (`copilot`) | `/login` in interaktiver Session | `-p --deny-tool=write --deny-tool=shell` |
+
+Consumer-Abo ≠ API. Die CLIs laufen über dein bereits angemeldetes Abo;
+die Browser-/OAuth-Verbindung läuft per HTTPS im jeweiligen offiziellen CLI.
+Verfügbarkeit und Modelle hängen vom Abo ab. Jeder Bot-Request läuft in einem
+leeren temporären Arbeitsordner und mit den konservativsten verfügbaren Flags
+(tool-disabled/read-only/plan/deny). Coding-CLIs bleiben trotzdem Agenten:
+Globale MCP-Server, Extensions und Account-Tools solltest du im jeweiligen CLI
+zusätzlich deaktivieren; nur Claude bietet hier eine vollständige `--tools ""`-
+Abschaltung. PandaBot vergibt niemals `--allow-all-tools`.
+
+### SSH-Tunnel
+
+Forward einen lokalen Port an einen entfernten OpenAI-kompatiblen Endpoint:
+
+```
+ssh -N -L 127.0.0.1:LOCAL:REMOTE_HOST:REMOTE_PORT -p PORT [-i key] user@host
+```
+
+- `BatchMode=yes` (nur Key-Auth, keine Passwort-Prompts)
+- `ExitOnForwardFailure=yes` (schnelles Fehlschlagen bei belegtem Port)
+- Private Schlüssel werden nie kopiert; die GUI hält nur den ausgewählten Pfad.
+- Danach ein Custom-OpenAI-Profil mit `http://127.0.0.1:LOCAL/v1/chat/completions`
+  anlegen, Modelle laden und aktivieren.
+- Der SSH-Host muss vorher einmal vertrauenswürdig in `known_hosts` bestätigt
+  worden sein; `BatchMode=yes` öffnet absichtlich keine Passwortabfrage.
 
 ## Benutzung
 
@@ -208,10 +315,15 @@ alles aus, mit `PROFILE_SUMMARY_AFTER=0` nur die automatische Zusammenfassung.
 
 | Datei | Zweck |
 |-------|-------|
-| `pandabot.py` | Hauptlogik: Bot, LLM-Client, Stream-Kontext, Idle-Routine |
+| `pandabot.py` | Hauptlogik: Bot, LLM-Client (OpenAI/Google native/CLI), Stream-Kontext, Idle-Routine |
 | `config.py` | Lädt die Konfiguration aus `.env` / Umgebungsvariablen |
+| `llm_profiles.py` | Provider-Presets, Profil-Store, Modell-Normalisierung, Control-Datei |
+| `cli_backends.py` | CLI-Transporte (Claude/Codex/Gemini/Copilot), SSH-Tunnel, Modell-Listen |
+| `pandabot_gui.py` | Cross-platform GUI für Profil-Verwaltung, Abo/CLI, SSH, Bot-Control |
+| `start_gui.bat` / `start_gui.sh` | GUI starten (Windows / Linux) |
+| `requirements-gui.txt` | GUI-Requirements (nur Stdlib nötig) |
 | `.env.example` | Vorlage für deine Konfiguration |
-| `test_pandabot.py` | Tests für Antwort-Aufbereitung und Erwähnungs-Erkennung |
+| `tests/test_pandabot.py` | Tests für Antwort-Aufbereitung, Erwähnungs-Erkennung, Profile, CLI |
 | `conftest.py` | Pytest-Setup (Dummy-Env), damit Tests eigenständig laufen |
 | `.github/workflows/ci.yml` | CI: Lint (ruff) + Tests auf Python 3.11–3.13 |
 
@@ -225,13 +337,13 @@ alles aus, mit `PROFILE_SUMMARY_AFTER=0` nur die automatische Zusammenfassung.
 | `LLM_REPEAT_PENALTY` | `1.15` | Strafe gegen Wiederholungen (llama.cpp) |
 | `LLM_SEND_REPEAT_PENALTY` | `true` | `repeat_penalty` mitschicken? Online wird automatisch deaktiviert |
 | `LLM_SEND_LLAMA_EXTRAS` | `true` | llama.cpp-Thinking-Extras mitschicken? Online wird automatisch deaktiviert |
-| `LLM_USE_SYSTEM_ROLE` | `true` | Anweisungen als System-Rolle senden? Online (Gemma) automatisch `false`; dann landen sie in der ersten User-Nachricht |
+| `LLM_USE_SYSTEM_ROLE` | `true` | Anweisungen als System-Rolle senden? Gemma 4 nutzt nativ `systemInstruction`; für inkompatible Custom-Backends auf `false` setzen |
 | `LLM_MAX_TOKENS` | `80` | Maximale Antwortlänge lokal |
 | `LLM_TIMEOUT` | `20` | Sekunden, bis ein lokaler LLM-Aufruf abbricht |
 | `GOOGLE_API_KEY` | leer | API-Key für Google AI Studio / Gemini API |
 | `GOOGLE_LLM_MODEL` | `gemma-4-31b-it` | Online-Modell |
-| `GOOGLE_LLM_MAX_TOKENS` | `200` | Maximale Antwortlänge online (inkl. Puffer für gefilterte `<thought>`-Blöcke) |
-| `GOOGLE_LLM_TIMEOUT` | `30` | Timeout für Online-Aufrufe |
+| `GOOGLE_LLM_MAX_TOKENS` | `512` | Maximale Antwortlänge online (inkl. Puffer für gefilterte `<thought>`-Blöcke) |
+| `GOOGLE_LLM_TIMEOUT` | `45` | Timeout für Online-Aufrufe |
 | `HISTORY_LENGTH` | `16` | Wie viele Verlaufs-Turns als Kontext dienen (inkl. eigener Bot-Antworten) |
 | `IDLE_THRESHOLD` | `900` | Sekunden Stille bis zur Eigeninitiative (ereignisgesteuert, kein Poll-Zyklus) |
 | `IDLE_JITTER` | `90` | Max. zufällige Sekunden, die zum Threshold addiert werden |
@@ -251,6 +363,7 @@ dürfen **niemals** committet werden – sie enthalten deine Secrets bzw. Tokens
 
 ## Fehlersuche
 
+- **„CLI fehlt / nicht im PATH":** Das Anbieter-CLI ist noch nicht installiert. Im Tab **Abos & Login** zuerst **Installieren** oder **Alle offiziellen CLIs installieren** wählen; danach **Login**. Node.js 22+ und npm müssen vorhanden sein.
 - **„Pflicht-Variable … fehlt":** Deine `.env` ist unvollständig – vergleiche mit `.env.example`.
 - **Bot startet, sagt aber nichts:** Bei `local`: Läuft der `llama-server` unter der `LLM_SERVER_URL`? Bei `online`: Ist `GOOGLE_API_KEY` gesetzt und gültig? Check die Logs auf „LLM-Backend nicht erreichbar".
 - **Keine Reaktion im Chat:** Wurde die Autorisierung für **beide** Accounts durchgeführt? Lösche notfalls `.tio.tokens.json` und wiederhole den OAuth-Schritt.
