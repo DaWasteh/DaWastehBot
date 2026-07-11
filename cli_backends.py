@@ -111,10 +111,11 @@ def find_cli(name: str) -> str | None:
     seen: set[str] = set()
     for candidate in candidates:
         normalized = os.path.normcase(str(candidate.resolve(strict=False)))
-        if normalized in seen:
+        comparison_key = normalized.casefold()
+        if comparison_key in seen:
             continue
-        seen.add(normalized)
-        if "github.copilot-chat\\copilotcli" in normalized.replace("/", "\\"):
+        seen.add(comparison_key)
+        if "github.copilot-chat\\copilotcli" in comparison_key.replace("/", "\\"):
             continue
         if candidate.is_file():
             return str(candidate)
