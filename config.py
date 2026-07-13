@@ -8,6 +8,7 @@ werden. Kopiere ``.env.example`` zu ``.env`` und trage deine Werte ein.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 
 try:
@@ -33,6 +34,36 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.lower() not in ("0", "false", "no", "off")
+
+
+def _env_float(name: str, default: float) -> float:
+    """Float aus der Umgebung; bei Tippfehlern Default statt Crash beim Import."""
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        print(
+            f"WARNUNG: {name}={value!r} ist keine gültige Zahl - nutze Default {default}.",
+            file=sys.stderr,
+        )
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Int aus der Umgebung; bei Tippfehlern Default statt Crash beim Import."""
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        print(
+            f"WARNUNG: {name}={value!r} ist keine gültige Ganzzahl - nutze Default {default}.",
+            file=sys.stderr,
+        )
+        return default
 
 
 def _first_env(*names: str) -> str | None:
@@ -73,12 +104,10 @@ class Settings:
     )
     llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "local-model"))
     llm_api_key: str | None = field(default_factory=lambda: _first_env("LLM_API_KEY"))
-    llm_temperature: float = field(
-        default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.8"))
-    )
-    llm_top_p: float = field(default_factory=lambda: float(os.getenv("LLM_TOP_P", "0.95")))
+    llm_temperature: float = field(default_factory=lambda: _env_float("LLM_TEMPERATURE", 0.8))
+    llm_top_p: float = field(default_factory=lambda: _env_float("LLM_TOP_P", 0.95))
     llm_repeat_penalty: float = field(
-        default_factory=lambda: float(os.getenv("LLM_REPEAT_PENALTY", "1.15"))
+        default_factory=lambda: _env_float("LLM_REPEAT_PENALTY", 1.15)
     )
     # repeat_penalty ist ein llama.cpp-Extra (nicht Teil der OpenAI-Spec).
     # Bei anderen Backends (z. B. vLLM) heißt der Parameter anders bzw. wird
@@ -99,8 +128,8 @@ class Settings:
     # Transport: "openai" (chat/completions) oder "google_native" (generateContent).
     # Das Online-Profil setzt automatisch "google_native".
     llm_transport: str = field(default_factory=lambda: os.getenv("LLM_TRANSPORT", "openai"))
-    llm_max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "80")))
-    llm_timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "20")))
+    llm_max_tokens: int = field(default_factory=lambda: _env_int("LLM_MAX_TOKENS", 80))
+    llm_timeout: float = field(default_factory=lambda: _env_float("LLM_TIMEOUT", 20))
 
     # --- Google/Gemma Online-Profil ---
     # Basis-URL für den nativen generateContent-Transport.  Der Bot hängt
@@ -115,26 +144,24 @@ class Settings:
         default_factory=lambda: os.getenv("GOOGLE_LLM_MODEL", "gemma-4-31b-it")
     )
     google_llm_max_tokens: int = field(
-        default_factory=lambda: int(os.getenv("GOOGLE_LLM_MAX_TOKENS", "512"))
+        default_factory=lambda: _env_int("GOOGLE_LLM_MAX_TOKENS", 512)
     )
-    google_llm_timeout: float = field(
-        default_factory=lambda: float(os.getenv("GOOGLE_LLM_TIMEOUT", "45"))
-    )
+    google_llm_timeout: float = field(default_factory=lambda: _env_float("GOOGLE_LLM_TIMEOUT", 45))
     google_api_key: str | None = field(
         default_factory=lambda: _first_env("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_LLM_API_KEY")
     )
 
     # --- Verhalten ---
-    history_length: int = field(default_factory=lambda: int(os.getenv("HISTORY_LENGTH", "16")))
+    history_length: int = field(default_factory=lambda: _env_int("HISTORY_LENGTH", 16))
     # Idle ist NICHT mehr ein starrer Poll-Zyklus, sondern ereignisgesteuert:
     # Der Hintergrund-Task schläft bis (letzte_Aktivität + idle_threshold + Jitter)
     # und wird bei jeder echten Chat-Nachricht neu auf diesen Zeitpunkt gelegt.
-    idle_threshold: int = field(default_factory=lambda: int(os.getenv("IDLE_THRESHOLD", "900")))
-    idle_jitter: int = field(default_factory=lambda: int(os.getenv("IDLE_JITTER", "90")))
+    idle_threshold: int = field(default_factory=lambda: _env_int("IDLE_THRESHOLD", 900))
+    idle_jitter: int = field(default_factory=lambda: _env_int("IDLE_JITTER", 90))
     idle_max_solo_messages: int = field(
-        default_factory=lambda: int(os.getenv("IDLE_MAX_SOLO_MESSAGES", "1"))
+        default_factory=lambda: _env_int("IDLE_MAX_SOLO_MESSAGES", 1)
     )
-    context_ttl: int = field(default_factory=lambda: int(os.getenv("CONTEXT_TTL", "120")))
+    context_ttl: int = field(default_factory=lambda: _env_int("CONTEXT_TTL", 120))
     max_message_length: int = 480  # Twitch-Limit ist 500; etwas Puffer.
     user_memory_dir: str = field(
         default_factory=lambda: os.getenv("USER_MEMORY_DIR", "user_memories")
@@ -149,18 +176,14 @@ class Settings:
     # PROFILE_SUMMARY_INTERVAL Interaktionen aufgefrischt. 0 deaktiviert die
     # automatische Zusammenfassung (dann wächst das Profil nur über explizite
     # "merk dir / remember"-Signale).
-    profile_summary_after: int = field(
-        default_factory=lambda: int(os.getenv("PROFILE_SUMMARY_AFTER", "2"))
-    )
+    profile_summary_after: int = field(default_factory=lambda: _env_int("PROFILE_SUMMARY_AFTER", 2))
     profile_summary_interval: int = field(
-        default_factory=lambda: int(os.getenv("PROFILE_SUMMARY_INTERVAL", "5"))
+        default_factory=lambda: _env_int("PROFILE_SUMMARY_INTERVAL", 5)
     )
     profile_interactions_kept: int = field(
-        default_factory=lambda: int(os.getenv("PROFILE_INTERACTIONS_KEPT", "8"))
+        default_factory=lambda: _env_int("PROFILE_INTERACTIONS_KEPT", 8)
     )
-    profile_max_notes: int = field(
-        default_factory=lambda: int(os.getenv("PROFILE_MAX_NOTES", "10"))
-    )
+    profile_max_notes: int = field(default_factory=lambda: _env_int("PROFILE_MAX_NOTES", 10))
 
     def _normalized_google_model(self) -> str:
         """Normalisiert häufige Vertipper/Aliase für das Google-Online-Profil.

@@ -456,3 +456,47 @@ class TestCLIRegistry:
             assert desc.login_hint
             assert desc.executable
             assert desc.npm_package.startswith("@")
+
+
+# --------------------------------------------------------------------------- #
+#  v1.2: Parser-Härtung gegen Nicht-Dict-JSON
+# --------------------------------------------------------------------------- #
+
+
+class TestParserHardening:
+    def test_claude_response_non_dict_json(self) -> None:
+        assert cb.parse_claude_response("[1, 2, 3]") is None
+        assert cb.parse_claude_response('"nur ein string"') is None
+
+    def test_gemini_response_non_dict_json(self) -> None:
+        assert cb.parse_gemini_response("[]") is None
+        assert cb.parse_gemini_response("42") is None
+
+    def test_codex_response_ignores_non_dict_lines(self) -> None:
+        raw = '[1,2]\n"text"\n{"type": "message", "content": "Servus!"}'
+        assert cb.parse_codex_response(raw) == "Servus!"
+
+    def test_openai_models_non_dict_entries(self) -> None:
+        assert cb.parse_openai_models("[1, 2]") == []
+        assert cb.parse_openai_models('{"data": ["nur-string", {"id": "m1"}]}') == ["m1"]
+
+    def test_google_models_non_dict_entries(self) -> None:
+        assert cb.parse_google_models('["x"]') == []
+        raw = json.dumps(
+            {
+                "models": [
+                    "kaputt",
+                    {
+                        "name": "models/gemma-4-31b-it",
+                        "supportedGenerationMethods": ["generateContent"],
+                    },
+                ]
+            }
+        )
+        assert cb.parse_google_models(raw) == ["gemma-4-31b-it"]
+
+    def test_claude_response_error_payload_is_dropped(self) -> None:
+        raw = json.dumps(
+            {"type": "result", "is_error": True, "result": "Not logged in · Please run /login"}
+        )
+        assert cb.parse_claude_response(raw) is None

@@ -16,7 +16,7 @@ für Unterhaltung.
 - **Stille = Gesprächsstarter, nie Lurker-Callout:** Ist der Chat ruhig (und der Stream live), wirft der Bot von selbst ein konkretes Topic, eine Frage oder Beobachtung in den Raum. Er **spricht niemals Lurker an**, outet niemanden beim Mitlesen und kommentiert keine Zuschauerzahlen.
 - **Kein Dauergeschwätz:** Höchstens `IDLE_MAX_SOLO_MESSAGES` eigene Beiträge ohne menschliche Reaktion; danach wartet der Bot auf echten Chat. Opener und ganze Antworten werden gegen frühere Beiträge abgeglichen, damit sich nichts wiederholt.
 - **`!panda <frage>`-Befehl:** Direkter Draht zum Bot.
-- **Robust:** Ist das LLM-Backend mal weg, schweigt der Bot einfach, statt abzustürzen.
+- **Robust:** Ist das LLM-Backend mal weg, schweigt der Bot einfach, statt abzustürzen. Transiente Fehler (Rate-Limit/5xx) werden bei allen HTTP-Backends automatisch kurz wiederholt, und beim Start warnt der Bot klar sichtbar, wenn der lokale llama-server nicht erreichbar ist.
 
 ## ⚠️ Wichtig: TwitchIO 3 statt 2
 

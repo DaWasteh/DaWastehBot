@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -34,6 +35,8 @@ from pathlib import Path
 # --------------------------------------------------------------------------- #
 #  Transport identifiers (mirrors llm_profiles for self-containment)
 # --------------------------------------------------------------------------- #
+LOGGER = logging.getLogger("pandabot.cli")
+
 T_CLAUDE = "claude_cli"
 T_CODEX = "codex_cli"
 T_GEMINI = "gemini_cli"
@@ -329,6 +332,12 @@ def parse_claude_response(raw: str) -> str | None:
     except json.JSONDecodeError:
         # Fallback: maybe partial JSON or plain text.
         return raw if raw else None
+    if not isinstance(data, dict):
+        return None
+    # Fehlermeldungen ("Not logged in - Please run /login") nie als Chat-Antwort
+    # durchreichen, auch wenn der Prozess mit Exit-Code 0 endet.
+    if data.get("is_error"):
+        return None
     result = data.get("result")
     if isinstance(result, str) and result.strip():
         return result.strip()
@@ -349,6 +358,8 @@ def parse_codex_response(raw: str) -> str | None:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
             continue
         # Codex events may carry the final message in different shapes.
         # Common patterns: {"type": "result", "message": "..."}
@@ -385,6 +396,8 @@ def parse_gemini_response(raw: str) -> str | None:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return raw if raw else None
+    if not isinstance(data, dict):
+        return None
     response = data.get("response")
     if isinstance(response, str) and response.strip():
         return response.strip()
@@ -430,8 +443,12 @@ def parse_openai_models(raw_json: str) -> list[str]:
         data = json.loads(raw_json)
     except json.JSONDecodeError:
         return []
+    if not isinstance(data, dict):
+        return []
     models: list[str] = []
     for entry in data.get("data", []):
+        if not isinstance(entry, dict):
+            continue
         model_id = entry.get("id")
         if isinstance(model_id, str) and model_id.strip():
             models.append(model_id.strip())
@@ -450,8 +467,12 @@ def parse_google_models(raw_json: str) -> list[str]:
         data = json.loads(raw_json)
     except json.JSONDecodeError:
         return []
+    if not isinstance(data, dict):
+        return []
     models: list[str] = []
     for entry in data.get("models", []):
+        if not isinstance(entry, dict):
+            continue
         name = entry.get("name", "")
         methods = entry.get("supportedGenerationMethods", [])
         if "generateContent" not in methods:
@@ -707,6 +728,16 @@ async def cli_complete(
     )
 
     if result.timed_out or result.returncode != 0:
+        # Grund loggen (z. B. "Not logged in"), sonst wirkt ein fehlender
+        # CLI-Login wie ein stumm kaputter Bot.
+        detail = (result.stderr or result.stdout).strip()[:200]
+        LOGGER.warning(
+            "CLI-Backend %s fehlgeschlagen (Exit %s%s): %s",
+            transport,
+            result.returncode,
+            ", Timeout" if result.timed_out else "",
+            detail or "(keine Ausgabe)",
+        )
         return None
 
     return parse_response_for_transport(transport, result.stdout)

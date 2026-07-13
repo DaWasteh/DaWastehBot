@@ -16,7 +16,9 @@ import logging
 import os
 import random
 import re
+import socket
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -24,7 +26,7 @@ from collections.abc import Sequence
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import aiohttp
 import twitchio
@@ -252,17 +254,23 @@ def _message_words(text: str) -> list[str]:
     return re.findall(r"[A-Za-zÀ-ž]+", text.lower())
 
 
-def detect_message_language(text: str) -> str:
+def detect_message_language(text: str, bot_names: Sequence[str] = ()) -> str:
     """Erkennt die wahrscheinlichste Sprache der aktuellen Chat-Nachricht.
 
     Absichtlich leichtgewichtig und deterministisch: Die Antwortsprache soll von
     der aktuellen Frage kommen, nicht von einer gespeicherten User-Notiz. Wenn
     die Nachricht zu kurz oder uneindeutig ist, bleibt der Stream-Default
-    Deutsch/Bayrisch.
+    Deutsch/Bayrisch. ``bot_names`` sind zusätzliche Trigger-Namen (Spitzname,
+    Account-Login), die vor der Erkennung entfernt werden, damit der Bot-Name
+    selbst das Sprachsignal nicht verfälscht.
     """
     lowered = text.lower()
     lowered = re.sub(r"!panda\b", " ", lowered)
     lowered = re.sub(r"@?\b(?:pandabot|dawastehbot)\b", " ", lowered)
+    for name in bot_names:
+        name = name.strip().lower()
+        if name:
+            lowered = re.sub(rf"@?(?<!\w){re.escape(name)}(?!\w)", " ", lowered)
     words = _message_words(lowered)
     if not words:
         return LANGUAGE_DEFAULT
@@ -570,6 +578,7 @@ class LLMClient:
 
     async def _complete_openai(self, messages: list[dict[str, str]]) -> str | None:
         """OpenAI-compatible chat/completions transport."""
+        assert self._session is not None  # von complete() über open() garantiert
         payload: dict[str, Any] = {
             "model": settings.llm_model,
             "messages": messages,
@@ -590,18 +599,38 @@ class LLMClient:
             {"Authorization": f"Bearer {settings.llm_api_key}"} if settings.llm_api_key else None
         )
 
-        try:
-            async with self._session.post(settings.llm_url, json=payload, headers=headers) as resp:
-                if resp.status != 200:
+        # Kurzer Retry bei transienten Fehlern (Rate-Limit/5xx) - wie beim
+        # Google-Transport. Online-Provider wie OpenRouter/Groq/Z.AI liefern
+        # gelegentlich 429/503, die eine Sekunde später durchgehen.
+        data: Any = None
+        for attempt in range(3):
+            try:
+                async with self._session.post(
+                    settings.llm_url, json=payload, headers=headers
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        break
                     body = await resp.text()
+                    transient = resp.status in {429, 500, 502, 503, 504}
+                    if transient and attempt < 2:
+                        LOGGER.warning(
+                            "LLM-Backend HTTP %s (Versuch %s/3), retry: %s",
+                            resp.status,
+                            attempt + 1,
+                            body[:160],
+                        )
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
                     LOGGER.warning("LLM-Backend HTTP %s: %s", resp.status, body[:200])
                     return None
-                data = await resp.json()
-        except (aiohttp.ClientError, TimeoutError) as exc:
-            LOGGER.warning("LLM-Backend nicht erreichbar: %s", exc)
-            return None
-        except Exception:  # noqa: BLE001 - defensiv, Bot soll nie crashen
-            LOGGER.exception("Unerwarteter Fehler beim LLM-Aufruf")
+            except (aiohttp.ClientError, TimeoutError) as exc:
+                LOGGER.warning("LLM-Backend nicht erreichbar: %s", exc)
+                return None
+            except Exception:  # noqa: BLE001 - defensiv, Bot soll nie crashen
+                LOGGER.exception("Unerwarteter Fehler beim LLM-Aufruf")
+                return None
+        if data is None:
             return None
 
         try:
@@ -626,6 +655,7 @@ class LLMClient:
         HTTP 500 for the MoE variant, so we call the native endpoint directly.
         Thought parts (``thought: true``) are filtered out.
         """
+        assert self._session is not None  # von complete() über open() garantiert
         model = settings.llm_model
         if model.startswith("models/"):
             model = model[len("models/") :]
@@ -1040,6 +1070,22 @@ class UserMemoryStore:
         safe_id = re.sub(r"[^0-9A-Za-z_-]", "_", str(user_id))
         return self.root / f"{safe_id}.md"
 
+    @staticmethod
+    def _write_text(path: Path, content: str) -> None:
+        """Atomar schreiben (temp + rename), damit ein Absturz/paralleler
+        Zugriff nie ein halb geschriebenes Profil hinterlässt."""
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            os.replace(tmp_name, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+
     def _clean_display_name(self, display_name: str, user_id: str) -> str:
         cleaned = re.sub(r"[\r\n\t]+", " ", str(display_name)).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
@@ -1106,7 +1152,7 @@ class UserMemoryStore:
                     "\n## Notizen\n", f"\n- Interaktionen: {count}\n\n## Notizen\n", 1
                 )
         try:
-            path.write_text(updated, encoding="utf-8")
+            self._write_text(path, updated)
         except OSError:
             LOGGER.exception("Konnte Interaktionszähler nicht speichern: %s", path)
         return count
@@ -1155,7 +1201,7 @@ class UserMemoryStore:
         else:
             updated = current.rstrip() + "\n\n" + section
         try:
-            path.write_text(updated, encoding="utf-8")
+            self._write_text(path, updated)
             LOGGER.info("User-Profil konsolidiert: %s", path)
         except OSError:
             LOGGER.exception("Konnte konsolidiertes Profil nicht speichern: %s", path)
@@ -1219,7 +1265,7 @@ class UserMemoryStore:
                     1,
                 )
             if updated != current or not path.exists():
-                path.write_text(updated, encoding="utf-8")
+                self._write_text(path, updated)
         except OSError:
             LOGGER.exception("Konnte User-Gedächtnis nicht anlegen/aktualisieren: %s", path)
 
@@ -1291,7 +1337,7 @@ class UserMemoryStore:
             current += f"\n{profile}"
 
         try:
-            path.write_text(current, encoding="utf-8")
+            self._write_text(path, current)
         except OSError:
             LOGGER.exception("Konnte User-Sprachprofil nicht speichern: %s", path)
 
@@ -1316,7 +1362,7 @@ class UserMemoryStore:
         if not current.endswith("\n"):
             current += "\n"
         current += "\n".join(new_lines) + "\n"
-        path.write_text(current, encoding="utf-8")
+        self._write_text(path, current)
         LOGGER.info("User-Gedächtnis aktualisiert: %s", path)
 
     def _clean_notes(self, notes: str) -> str:
@@ -1574,9 +1620,11 @@ class PandaBot(commands.Bot):
         LOGGER.info("Chat empfangen von %s (%s): %s", author, payload.chatter.id, text)
 
         # Direkter Befehl ohne TwitchIO-Command-Registry, damit es auch aus der
-        # Bot-Subclass zuverlässig funktioniert.
-        if text.lower().startswith("!panda"):
-            frage = text[len("!panda") :].strip()
+        # Bot-Subclass zuverlässig funktioniert. Wortgrenze verlangt, damit
+        # fremde Befehle wie "!pandas" oder "!pandapower" nicht triggern.
+        panda_cmd = re.match(r"!panda(?!\w)", text, re.IGNORECASE)
+        if panda_cmd:
+            frage = text[panda_cmd.end() :].strip()
             await self._respond(payload, author=author, trigger=frage or text)
             return
 
@@ -1615,8 +1663,9 @@ class PandaBot(commands.Bot):
         for name in self._bot_trigger_names():
             if not name:
                 continue
-            # @name trifft immer (eindeutige Erwähnung).
-            if f"@{name}" in lowered:
+            # @name als eigenständige Erwähnung; "@pandabot2" ist ein anderer
+            # Account und darf nicht triggern.
+            if re.search(rf"@{re.escape(name)}(?!\w)", lowered):
                 return True
             # Name ohne @ nur als eigenständiges Wort, damit nicht zufällige
             # Substrings (z. B. in anderen Wörtern) fälschlich triggern.
@@ -2074,7 +2123,7 @@ class PandaBot(commands.Bot):
             LOGGER.debug("LLM beschäftigt, Trigger von %s verworfen", author)
             return
 
-        current_language = detect_message_language(trigger)
+        current_language = detect_message_language(trigger, sorted(self._bot_trigger_names()))
 
         async with self._llm_lock:
             if self._broadcaster:
@@ -2461,6 +2510,30 @@ def _select_llm_backend() -> None:
     LOGGER.info("LLM-Profil: %s", settings.llm_backend_label)
 
 
+def _warn_if_local_llm_unreachable() -> None:
+    """Warnt beim Start klar sichtbar, wenn der lokale llama-server nicht läuft.
+
+    Der Bot bleibt bewusst lauffähig (er schweigt dann bzw. nutzt Fallbacks),
+    aber ohne diese Warnung wirkt ein vergessener llama-server wie ein
+    kaputter Bot.
+    """
+    if settings.llm_backend != "local":
+        return
+    parsed = urlparse(settings.llm_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=2.0):
+            return
+    except OSError:
+        LOGGER.warning(
+            "Lokaler llama-server unter %s ist NICHT erreichbar - der Bot startet trotzdem, "
+            "antwortet aber erst, wenn der Server läuft (z. B. 'llama-server -m modell.gguf --port %s').",
+            settings.llm_url,
+            port,
+        )
+
+
 def _watch_gui_stdin(bot: PandaBot) -> None:
     """GUI-Modus: fährt den Bot sauber herunter, wenn die GUI stdin schließt.
 
@@ -2487,6 +2560,7 @@ def _watch_gui_stdin(bot: PandaBot) -> None:
 def main() -> None:
     twitchio.utils.setup_logging(level=logging.INFO)
     _select_llm_backend()
+    _warn_if_local_llm_unreachable()
 
     async def runner() -> None:
         async with PandaBot() as bot:

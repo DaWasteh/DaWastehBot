@@ -1063,3 +1063,157 @@ def test_apply_control_data_switches_transport(client: LLMClient) -> None:
 
     # Restore
     settings.llm_transport = "openai"
+
+
+# --------------------------------------------------------------------------- #
+#  v1.2: Trigger-Wortgrenzen, Sprach-Stripping, Retry, Env-Parsing            #
+# --------------------------------------------------------------------------- #
+def test_is_mention_at_name_requires_word_boundary(bot: PandaBot) -> None:
+    """ "@pandabot2" ist ein anderer Account und darf nicht triggern."""
+    assert bot._is_mention("@pandabot2 hallo") is False
+    assert bot._is_mention("@dawastehbot2 hi") is False
+    assert bot._is_mention("@pandabot, hallo") is True
+    assert bot._is_mention("hey @dawastehbot!") is True
+
+
+@pytest.mark.parametrize(
+    ("text", "should_trigger", "expected_trigger"),
+    [
+        ("!panda erzähl einen Witz", True, "erzähl einen Witz"),
+        ("!PANDA hi", True, "hi"),
+        ("!panda? was geht", True, "? was geht"),
+        ("!pandas sind süß", False, None),
+        ("!pandapower aktivieren", False, None),
+    ],
+)
+def test_panda_command_requires_word_boundary(
+    bot: PandaBot,
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+    should_trigger: bool,
+    expected_trigger: str | None,
+) -> None:
+    monkeypatch.setattr(settings, "user_memory_enabled", False)
+    calls: list[str] = []
+
+    async def fake_respond(payload: object, *, author: str, trigger: str) -> None:
+        calls.append(trigger)
+
+    monkeypatch.setattr(bot, "_respond", fake_respond)
+    payload = SimpleNamespace(
+        chatter=SimpleNamespace(id="55", name="tester", display_name="Tester"),
+        text=text,
+    )
+
+    asyncio.run(bot.event_message(_chat_message(payload)))
+
+    if should_trigger:
+        assert calls == [expected_trigger]
+    else:
+        assert calls == []
+
+
+def test_detect_message_language_strips_custom_bot_names() -> None:
+    """Ein Bot-Name, der wie ein englisches Wort aussieht, darf die
+    Spracherkennung nicht kippen."""
+    # Ohne Stripping zählt "story" als englischer Marker und gewinnt den
+    # Gleichstand gegen Schwedisch; mit bot_names wird der Name entfernt.
+    assert detect_message_language("@story berätta", ["story"]) == LANGUAGE_SWEDISH
+    # Bestehendes Verhalten ohne bot_names bleibt unverändert.
+    assert detect_message_language("servus wie gehts") == LANGUAGE_DEFAULT
+
+
+class _FakeResponse:
+    def __init__(self, status: int, payload: dict | None = None) -> None:
+        self.status = status
+        self._payload = payload or {}
+
+    async def json(self) -> dict:
+        return self._payload
+
+    async def text(self) -> str:
+        return "fake-error-body"
+
+    async def __aenter__(self) -> _FakeResponse:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeSession:
+    """Gibt vorbereitete Antworten der Reihe nach zurück."""
+
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self._responses = responses
+        self.calls = 0
+        self.closed = False
+
+    def post(self, url: str, **kwargs: object) -> _FakeResponse:
+        response = self._responses[min(self.calls, len(self._responses) - 1)]
+        self.calls += 1
+        return response
+
+
+def test_complete_openai_retries_transient_errors(
+    client: LLMClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """429/5xx werden kurz wiederholt statt sofort aufzugeben."""
+
+    async def instant_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    ok_payload = {"choices": [{"message": {"content": "Servus, bin wieder da!"}}]}
+    session = _FakeSession([_FakeResponse(503), _FakeResponse(200, ok_payload)])
+    client._session = session  # type: ignore[assignment]
+
+    reply = asyncio.run(client._complete_openai([{"role": "user", "content": "hi"}]))
+
+    assert reply == "Servus, bin wieder da!"
+    assert session.calls == 2
+
+
+def test_complete_openai_gives_up_on_permanent_error(
+    client: LLMClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _FakeSession([_FakeResponse(401)])
+    client._session = session  # type: ignore[assignment]
+
+    reply = asyncio.run(client._complete_openai([{"role": "user", "content": "hi"}]))
+
+    assert reply is None
+    assert session.calls == 1
+
+
+def test_env_float_and_int_fall_back_on_garbage(monkeypatch: pytest.MonkeyPatch) -> None:
+    from config import _env_float, _env_int
+
+    monkeypatch.setenv("PANDA_TEST_FLOAT", "0,8")  # deutsches Komma = Tippfehler
+    monkeypatch.setenv("PANDA_TEST_INT", "abc")
+    assert _env_float("PANDA_TEST_FLOAT", 0.5) == 0.5
+    assert _env_int("PANDA_TEST_INT", 42) == 42
+    monkeypatch.setenv("PANDA_TEST_FLOAT", "1.25")
+    monkeypatch.setenv("PANDA_TEST_INT", "7")
+    assert _env_float("PANDA_TEST_FLOAT", 0.5) == 1.25
+    assert _env_int("PANDA_TEST_INT", 42) == 7
+
+
+def test_warn_if_local_llm_unreachable_logs_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    from pandabot import _warn_if_local_llm_unreachable
+
+    monkeypatch.setattr(settings, "llm_backend", "local")
+    monkeypatch.setattr(settings, "llm_url", "http://127.0.0.1:1/v1/chat/completions")
+    with caplog.at_level(logging.WARNING, logger="pandabot"):
+        _warn_if_local_llm_unreachable()
+    assert any("NICHT erreichbar" in rec.message for rec in caplog.records)
+
+    caplog.clear()
+    monkeypatch.setattr(settings, "llm_backend", "online")
+    with caplog.at_level(logging.WARNING, logger="pandabot"):
+        _warn_if_local_llm_unreachable()
+    assert not caplog.records

@@ -567,7 +567,7 @@ class PandaBotGUI:
         if not sel:
             return
         display = self.profile_listbox.get(sel[0])
-        name = display.rstrip(" ★")
+        name = display.removesuffix(" ★")
         prof = self.store.profiles.get(name)
         if not prof:
             return
@@ -721,7 +721,7 @@ class PandaBotGUI:
         if not sel:
             return
         display = self.profile_listbox.get(sel[0])
-        name = display.rstrip(" ★")
+        name = display.removesuffix(" ★")
         if messagebox.askyesno("Löschen", f"Profil „{name}“ wirklich löschen?"):
             self.store.delete(name)
             self.store.save()
