@@ -449,15 +449,23 @@ class LLMClient:
         self._session_timeout: float = 0.0
         # Control-file mtime for runtime profile switching (GUI mode).
         self._last_control_mtime_ns: int = 0
-        # Stop-Strings verhindern, dass kleine Modelle sich selbst als weitere
-        # Chatter halluzinieren und einen ganzen Fake-Dialog schreiben.
-        self._stop = [
-            f"{settings.bot_name}:",
-            "User:",
-            "Chat:",
-            "<|im_start|>",
-            "<|im_end|>",
-        ]
+
+    def _stop_strings(self) -> list[str]:
+        """Stop-Strings passend zum aktiven Profil (pro Request berechnet).
+
+        Sie verhindern, dass kleine Modelle sich selbst als weitere Chatter
+        halluzinieren und einen ganzen Fake-Dialog schreiben. Die
+        ChatML-Marker sind llama.cpp-spezifisch und gehen nur ans lokale
+        Profil; OpenAI-kompatible Online-Provider (OpenAI, Z.AI, ...)
+        erlauben höchstens 4 Stop-Sequenzen und lehnen Requests mit mehr
+        per HTTP 400 komplett ab.
+        """
+        stop = [f"{settings.bot_name}:", "User:", "Chat:"]
+        if settings.llm_send_llama_extras:
+            stop += ["<|im_start|>", "<|im_end|>"]
+        else:
+            stop = stop[:4]
+        return stop
 
     async def open(self) -> None:
         if (
@@ -585,7 +593,7 @@ class LLMClient:
             "temperature": settings.llm_temperature,
             "max_tokens": settings.llm_max_tokens,
             "top_p": settings.llm_top_p,
-            "stop": self._stop,
+            "stop": self._stop_strings(),
             "stream": False,
         }
 

@@ -1217,3 +1217,19 @@ def test_warn_if_local_llm_unreachable_logs_warning(
     with caplog.at_level(logging.WARNING, logger="pandabot"):
         _warn_if_local_llm_unreachable()
     assert not caplog.records
+
+
+def test_stop_strings_respect_online_provider_limit(
+    client: LLMClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenAI/Z.AI erlauben max. 4 Stop-Sequenzen; ChatML-Marker nur lokal."""
+    monkeypatch.setattr(settings, "llm_send_llama_extras", False)
+    online_stop = client._stop_strings()
+    assert len(online_stop) <= 4
+    assert "<|im_start|>" not in online_stop
+    assert f"{settings.bot_name}:" in online_stop
+
+    monkeypatch.setattr(settings, "llm_send_llama_extras", True)
+    local_stop = client._stop_strings()
+    assert "<|im_start|>" in local_stop
+    assert "<|im_end|>" in local_stop
