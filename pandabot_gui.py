@@ -61,10 +61,12 @@ from cli_backends import (
     parse_models_for_transport,
 )
 from llm_profiles import (
+    CLI_TRANSPORTS,
     DEFAULT_CONTROL_PATH,
     PROVIDERS,
     LLMProfile,
     ProfileStore,
+    ProviderPreset,
     normalize_model_id,
     write_control_file,
 )
@@ -583,6 +585,11 @@ class PandaBotGUI:
         self._profile_vars["max_tokens"].set(str(prof.max_tokens))
         self._profile_vars["timeout"].set(str(prof.timeout))
         self._profile_vars["use_system_role"].set(prof.use_system_role)
+        # Dropdown mit statischen Vorschlägen füllen und die echte Modellliste
+        # des Providers still nachladen (gespeichertes Modell bleibt gewählt).
+        if preset:
+            self._model_combo["values"] = list(preset.model_suggestions)
+            self._auto_load_models(preset)
 
     def _get_provider_id(self) -> str:
         """Extract the provider ID from the 'id  (label)' combo string."""
@@ -603,6 +610,44 @@ class PandaBotGUI:
         self._profile_vars["max_tokens"].set(str(preset.max_tokens_default))
         self._profile_vars["timeout"].set(str(preset.timeout_default))
         self._profile_vars["use_system_role"].set(preset.supports_system_role)
+        # Neuer Provider -> altes Modell gilt nicht mehr: Vorschläge setzen und
+        # die echte Modellliste automatisch im Hintergrund laden.
+        self._model_combo["values"] = list(preset.model_suggestions)
+        self._profile_vars["model"].set(
+            preset.model_suggestions[0] if preset.model_suggestions else ""
+        )
+        self._auto_load_models(preset)
+
+    def _auto_load_models(self, preset: ProviderPreset) -> None:
+        """Lädt die Modellliste des Providers still im Hintergrund.
+
+        Läuft ohne Fehler-Popups: Wenn kein API-Key auffindbar ist oder der
+        Provider keinen ``/models``-Endpoint hat (z. B. Z.AI), bleiben einfach
+        die statischen Vorschläge im Dropdown stehen.
+        """
+        if preset.transport in CLI_TRANSPORTS:
+            return
+        endpoint = self._profile_vars["endpoint"].get().strip() or preset.base_url
+        if not endpoint:
+            return
+        api_key = ""
+        if preset.id != "local":
+            probe = LLMProfile(
+                name="",
+                provider=preset.id,
+                api_key=self._profile_vars["api_key"].get().strip(),
+            )
+            api_key = probe.resolve_api_key()
+            if not api_key:
+                # Kein Key im Formular, in der Umgebung oder .env: nichts laden.
+                return
+        self.status_var.set(f"Lade Modelle für {preset.label} …")
+        threading.Thread(
+            target=self._fetch_models,
+            args=(endpoint, api_key, preset.transport),
+            kwargs={"quiet": True, "fallback": list(preset.model_suggestions)},
+            daemon=True,
+        ).start()
 
     def _toggle_key_visibility(self) -> None:
         self._api_key_entry.configure(show="" if self._show_key_var.get() else "*")
@@ -722,8 +767,21 @@ class PandaBotGUI:
         )
         thread.start()
 
-    def _fetch_models(self, endpoint: str, api_key: str, transport: str) -> None:
-        """Background: fetch all model pages and update the combobox."""
+    def _fetch_models(
+        self,
+        endpoint: str,
+        api_key: str,
+        transport: str,
+        *,
+        quiet: bool = False,
+        fallback: list[str] | None = None,
+    ) -> None:
+        """Background: fetch all model pages and update the combobox.
+
+        ``quiet=True`` (Auto-Load beim Provider-Wechsel) zeigt keine
+        Fehler-Popups und behält die aktuelle Modell-Auswahl bei; bei Fehlern
+        bleiben die ``fallback``-Vorschläge im Dropdown.
+        """
         try:
             url, headers = build_models_request(endpoint, api_key, transport)
             models: list[str] = []
@@ -747,15 +805,30 @@ class PandaBotGUI:
                     break
             models = sorted(set(models))
         except (json.JSONDecodeError, urllib.error.URLError, OSError) as exc:
-            self.root.after(0, self._models_error, str(exc))
+            if quiet:
+                self.root.after(0, self._models_quiet_failed, fallback or [])
+            else:
+                self.root.after(0, self._models_error, str(exc))
             return
-        self.root.after(0, self._models_loaded, models)
+        if quiet and not models:
+            self.root.after(0, self._models_quiet_failed, fallback or [])
+            return
+        self.root.after(0, self._models_loaded, models, quiet)
 
-    def _models_loaded(self, models: list[str]) -> None:
+    def _models_loaded(self, models: list[str], keep_selection: bool = False) -> None:
+        current = self._profile_vars["model"].get().strip()
         self._model_combo["values"] = models
-        if models:
+        if models and not (keep_selection and current):
             self._model_combo.set(models[0])
         self.status_var.set(f"{len(models)} Modelle geladen.")
+
+    def _models_quiet_failed(self, fallback: list[str]) -> None:
+        """Auto-Load fehlgeschlagen: Vorschläge behalten, nur Statuszeile."""
+        if fallback:
+            self._model_combo["values"] = fallback
+        self.status_var.set(
+            "Keine Modellliste vom Provider verfügbar - Modell bitte auswählen/eintragen."
+        )
 
     def _models_error(self, msg: str) -> None:
         messagebox.showerror("Modelle laden fehlgeschlagen", msg[:300])
@@ -1090,9 +1163,13 @@ class PandaBotGUI:
 
         try:
             if sys.platform == "win32":
+                # CREATE_NO_WINDOW: kein sichtbares Konsolenfenster für den Bot.
+                # stdin bleibt als Pipe offen; Schließen der Pipe = sauberes
+                # Shutdown-Signal (siehe _watch_gui_stdin im Bot).
                 self._bot_proc = subprocess.Popen(
                     [python, str(REPO_ROOT / "pandabot.py")],
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -1105,6 +1182,7 @@ class PandaBotGUI:
                 self._bot_proc = subprocess.Popen(
                     [python, str(REPO_ROOT / "pandabot.py")],
                     start_new_session=True,
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -1149,15 +1227,19 @@ class PandaBotGUI:
     def _stop_bot(self) -> None:
         if self._bot_proc is None:
             return
+        # Graceful: stdin-Pipe schließen (EOF = Shutdown-Signal im Bot).
+        # Funktioniert auch ohne sichtbares/gemeinsames Konsolenfenster,
+        # wo CTRL_BREAK_EVENT nicht mehr zuverlässig ankommt.
         try:
-            if sys.platform == "win32":
-                self._bot_proc.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
-                import os
-
-                os.killpg(os.getpgid(self._bot_proc.pid), signal.SIGTERM)
-        except (OSError, ProcessLookupError):
+            if self._bot_proc.stdin is not None:
+                self._bot_proc.stdin.close()
+        except OSError:
             pass
+        if sys.platform != "win32":
+            try:
+                os.killpg(os.getpgid(self._bot_proc.pid), signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                pass
         # Wait up to 5s, then force kill.
         try:
             self._bot_proc.wait(timeout=5)

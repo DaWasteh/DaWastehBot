@@ -319,10 +319,11 @@ class TestCommandBuilders:
         assert "read-only" in args
         assert "--skip-git-repo-check" in args
         assert "--json" in args
+        assert args[-1] == "-"  # Prompt kommt über stdin
 
     def test_gemini_command(self) -> None:
         args = cb.build_gemini_command("auto")
-        assert args[-1] == "-p"  # run_cli appends the prompt value
+        assert "-p" not in args  # Prompt kommt über stdin, nie als argv
         assert "--output-format" in args
         assert "json" in args
         assert "--sandbox" in args
@@ -344,6 +345,33 @@ class TestCommandBuilders:
     def test_dispatch_unknown_raises(self) -> None:
         with pytest.raises(ValueError):
             cb.build_command_for_transport("unknown_cli", "x")
+
+    def test_stdin_transports(self) -> None:
+        """Chat-Prompts gehen bei diesen CLIs über stdin, nie über argv."""
+        assert cb.STDIN_PROMPT_TRANSPORTS == {"claude_cli", "codex_cli", "gemini_cli"}
+
+
+class TestArgvSafePrompt:
+    def test_exe_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(cb.sys, "platform", "win32")
+        assert cb._argv_safe_prompt("C:\\bin\\copilot.exe", 'a & b | "c" %x%') == 'a & b | "c" %x%'
+
+    def test_cmd_shim_strips_metachars(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(cb.sys, "platform", "win32")
+        result = cb._argv_safe_prompt("C:\\npm\\copilot.CMD", 'hi & del *.* | "x" %PATH% ^!')
+        for ch in '&|"%^!<>':
+            assert ch not in result
+        assert "hi" in result
+
+    def test_cmd_shim_folds_newlines(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(cb.sys, "platform", "win32")
+        result = cb._argv_safe_prompt("copilot.cmd", "Zeile1\r\nZeile2")
+        assert "\n" not in result and "\r" not in result
+        assert "Zeile1" in result and "Zeile2" in result
+
+    def test_non_windows_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(cb.sys, "platform", "linux")
+        assert cb._argv_safe_prompt("/usr/bin/copilot", "a & b\nc") == "a & b\nc"
 
 
 # --------------------------------------------------------------------------- #

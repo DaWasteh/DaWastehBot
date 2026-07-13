@@ -60,6 +60,9 @@ class ProviderPreset:
     timeout_default: float = 30.0
     # Environment variable names consulted as API-key fallback.
     key_env_names: tuple[str, ...] = ()
+    # Static model suggestions for the GUI dropdown (stays editable). Useful
+    # for providers without a reliable public /models endpoint.
+    model_suggestions: tuple[str, ...] = ()
 
     def models_url(self) -> str:
         """Endpoint for listing available models.
@@ -158,6 +161,26 @@ PROVIDERS: dict[str, ProviderPreset] = {
             max_tokens_default=300,
             timeout_default=30.0,
             key_env_names=("XAI_API_KEY",),
+        ),
+        ProviderPreset(
+            id="zai",
+            label="Z.AI (GLM, API-Key)",
+            transport=TRANSPORT_OPENAI,
+            base_url="https://api.z.ai/api/paas/v4/chat/completions",
+            max_tokens_default=300,
+            timeout_default=45.0,
+            key_env_names=("ZAI_API_KEY", "Z_AI_API_KEY", "ZHIPU_API_KEY"),
+            model_suggestions=("glm-4.7", "glm-4.6", "glm-4.5-air"),
+        ),
+        ProviderPreset(
+            id="zai_coding",
+            label="Z.AI Coding-Plan (Abo-Endpoint, GLM)",
+            transport=TRANSPORT_OPENAI,
+            base_url="https://api.z.ai/api/coding/paas/v4/chat/completions",
+            max_tokens_default=300,
+            timeout_default=45.0,
+            key_env_names=("ZAI_API_KEY", "Z_AI_API_KEY", "ZHIPU_API_KEY"),
+            model_suggestions=("glm-4.7", "glm-4.6"),
         ),
         ProviderPreset(
             id="custom",
@@ -348,9 +371,8 @@ class LLMProfile:
 
     def effective_endpoint(self) -> str:
         """The endpoint to use: profile override or provider default."""
-        endpoint = self.endpoint or (
-            PROVIDERS.get(self.provider).base_url if self.provider in PROVIDERS else ""
-        )
+        preset = PROVIDERS.get(self.provider)
+        endpoint = self.endpoint or (preset.base_url if preset else "")
         if self.transport() == TRANSPORT_GOOGLE_NATIVE:
             clean = endpoint.rstrip("/")
             for suffix in ("/openai/chat/completions", "/openai"):
@@ -462,14 +484,19 @@ DEFAULT_CONTROL_PATH = Path(__file__).resolve().parent / ".pandabot_llm_control.
 
 
 def _control_dict(profile: LLMProfile) -> dict[str, Any]:
-    """Serialise a profile for the control file (consumed by the bot)."""
+    """Serialise a profile for the control file (consumed by the bot).
+
+    Bewusst OHNE API-Key: Der Key lebt nur in ``llm_profiles.json`` bzw. der
+    ``.env``; der Bot löst ihn beim Übernehmen des Profils selbst über
+    :func:`resolve_control_api_key` auf. So liegt das Secret nicht in einer
+    zweiten Datei herum.
+    """
     return {
         "profile_name": profile.name,
         "provider": profile.provider,
         "transport": profile.transport(),
         "endpoint": profile.effective_endpoint(),
         "model": normalize_model_id(profile.model, provider=profile.provider),
-        "api_key": profile.resolve_api_key(),
         "max_tokens": profile.max_tokens,
         "temperature": profile.temperature,
         "top_p": profile.top_p,
@@ -496,3 +523,27 @@ def read_control_file(path: Path | str = DEFAULT_CONTROL_PATH) -> dict[str, Any]
         return json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+
+
+def resolve_control_api_key(
+    data: dict[str, Any], profiles_path: Path | str = DEFAULT_PROFILES_PATH
+) -> str:
+    """Resolve the API key for a control-file profile switch.
+
+    Reihenfolge:
+    1. Key direkt in der Control-Datei (Alt-Format, Rückwärtskompatibilität).
+    2. Gespeicherter Key des benannten Profils in ``llm_profiles.json``
+       (inkl. dessen Env-/.env-Fallback über :meth:`LLMProfile.resolve_api_key`).
+    3. Env-/.env-Fallback allein anhand des Providers.
+    """
+    direct = data.get("api_key")
+    if isinstance(direct, str) and direct:
+        return direct
+    store = ProfileStore.load(profiles_path)
+    profile = store.profiles.get(str(data.get("profile_name", "")))
+    if profile is not None:
+        key = profile.resolve_api_key()
+        if key:
+            return key
+    fallback = LLMProfile(name="", provider=str(data.get("provider", "custom")))
+    return fallback.resolve_api_key()

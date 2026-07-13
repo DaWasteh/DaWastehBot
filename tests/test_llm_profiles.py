@@ -14,6 +14,7 @@ from llm_profiles import (
     ProfileStore,
     normalize_model_id,
     read_control_file,
+    resolve_control_api_key,
     write_control_file,
 )
 
@@ -203,7 +204,31 @@ class TestControlFile:
         assert data is not None
         assert data["transport"] == "google_native"
         assert data["model"] == "gemma-4-31b-it"
-        assert data["api_key"] == "secret"
+        # Secrets gehören NICHT in die Control-Datei.
+        assert "secret" not in path.read_text(encoding="utf-8")
+        assert not data.get("api_key")
+
+    def test_resolve_key_from_profile_store(self, tmp_path: Path) -> None:
+        """Der Bot löst den Key über llm_profiles.json auf, nicht aus der Control-Datei."""
+        profiles_path = tmp_path / "llm_profiles.json"
+        store = ProfileStore(path=profiles_path)
+        store.upsert(LLMProfile(name="Online", provider="openai", api_key="sk-stored"))
+        store.save()
+        data = {"profile_name": "Online", "provider": "openai"}
+        assert resolve_control_api_key(data, profiles_path) == "sk-stored"
+
+    def test_resolve_key_env_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ZAI_API_KEY", "zai-env-key")
+        monkeypatch.setenv("PANDABOT_ENV_FILE", str(tmp_path / "no.env"))
+        data = {"profile_name": "Unbekannt", "provider": "zai"}
+        assert resolve_control_api_key(data, tmp_path / "missing.json") == "zai-env-key"
+
+    def test_resolve_key_legacy_inline(self, tmp_path: Path) -> None:
+        """Alt-Format mit Key in der Control-Datei bleibt lesbar."""
+        data = {"profile_name": "X", "provider": "openai", "api_key": "inline"}
+        assert resolve_control_api_key(data, tmp_path / "missing.json") == "inline"
 
     def test_read_missing(self, tmp_path: Path) -> None:
         assert read_control_file(tmp_path / "missing.json") is None
@@ -241,3 +266,18 @@ class TestProviderPresets:
         for cid in ("claude_cli", "codex_cli", "gemini_cli", "copilot_cli"):
             assert cid in PROVIDERS
             assert PROVIDERS[cid].transport.endswith("_cli")
+
+    def test_zai_presets(self) -> None:
+        api = PROVIDERS["zai"]
+        assert api.transport == "openai"
+        assert api.base_url == "https://api.z.ai/api/paas/v4/chat/completions"
+        assert "ZAI_API_KEY" in api.key_env_names
+        assert "glm-4.7" in api.model_suggestions
+
+        coding = PROVIDERS["zai_coding"]
+        assert coding.transport == "openai"
+        assert coding.base_url == "https://api.z.ai/api/coding/paas/v4/chat/completions"
+        assert "ZAI_API_KEY" in coding.key_env_names
+
+    def test_zai_models_url(self) -> None:
+        assert PROVIDERS["zai"].models_url() == "https://api.z.ai/api/paas/v4/models"

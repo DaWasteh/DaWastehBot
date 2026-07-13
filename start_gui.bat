@@ -8,11 +8,14 @@ cd /d "%~dp0"
 
 REM GUI bevorzugt eine eigene .venv-gui; der Bot nutzt weiterhin .venv.
 REM tkinter ist Teil der Python-Standardbibliothek.
-set "PYTHON=.venv-gui\Scripts\python.exe"
-if not exist "%PYTHON%" set "PYTHON=.venv\Scripts\python.exe"
+set "VENVDIR=.venv-gui"
+if not exist "%VENVDIR%\Scripts\python.exe" set "VENVDIR=.venv"
+set "PYTHON=%VENVDIR%\Scripts\python.exe"
+set "PYTHONW=%VENVDIR%\Scripts\pythonw.exe"
 if not exist "%PYTHON%" (
     echo [INFO] Keine Projekt-venv gefunden, nutze System-Python.
     set "PYTHON=python"
+    set "PYTHONW=pythonw"
 )
 
 "%PYTHON%" -c "import sv_ttk" >nul 2>&1
@@ -26,5 +29,8 @@ if errorlevel 1 (
     )
 )
 
-"%PYTHON%" pandabot_gui.py
-if errorlevel 1 pause
+REM GUI ohne Konsolenfenster starten (pythonw); dieses cmd-Fenster schließt
+REM sich sofort. Fallback auf python.exe, falls pythonw in der venv fehlt.
+if /i not "%PYTHONW%"=="pythonw" if not exist "%PYTHONW%" set "PYTHONW=%PYTHON%"
+start "PandaBot GUI" "%PYTHONW%" pandabot_gui.py
+exit /b 0

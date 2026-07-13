@@ -218,13 +218,20 @@ python3 -m venv .venv-gui
 ### API-Profile
 
 - Provider-Presets: Local llama.cpp, Google native, OpenAI, OpenRouter, Groq,
-  Mistral, xAI, Custom OpenAI-compatible.
+  Mistral, xAI, **Z.AI (GLM)**, **Z.AI Coding-Plan**, Custom OpenAI-compatible.
 - Pro Profil: Provider, maskierter API-Key, Endpoint, Modell-Dropdown
   (editierbar), Temperatur/TopP/MaxTokens/Timeout/Systemrolle.
 - **„Modelle laden“** ruft pro API-Key `/models` ab und befüllt das Dropdown.
   Bei Google native werden nur `generateContent`-fähige Modelle gezeigt.
+  Für Z.AI werden GLM-Vorschläge (`glm-4.7`, `glm-4.6`, …) vorbefüllt.
+- **Z.AI:** `zai` nutzt die normale GLM-API
+  (`https://api.z.ai/api/paas/v4/...`), `zai_coding` den Endpoint des
+  GLM-Coding-Plan-Abos (`https://api.z.ai/api/coding/paas/v4/...`) – beide mit
+  demselben API-Key (`ZAI_API_KEY` in der `.env` als Fallback).
 - API-Keys werden in einer lokalen, atomar geschriebenen `llm_profiles.json`
   gespeichert (gitignored, best-effort `0600`). `.env`-Keys sind Fallback.
+  Die Control-Datei für den Profilwechsel enthält **keinen** API-Key; der Bot
+  löst den Key selbst über `llm_profiles.json`/`.env` auf.
 
 ### On-the-fly Modellwechsel
 
@@ -257,10 +264,16 @@ Die Login-Buttons öffnen ein Terminal mit dem offiziellen CLI:
 
 | CLI | Login | Headless-Aufruf (read-only) |
 |-----|-------|-----------------------------|
-| Claude Code (`claude`) | `/login` in interaktiver Session | `--bare -p --tools "" --no-session-persistence` |
-| OpenAI Codex (`codex`) | `codex login` | `exec --sandbox read-only --json` |
-| Gemini CLI (`gemini`) | „Sign in with Google“ | `-p --output-format json` |
+| Claude Code (`claude`) | `/login` in interaktiver Session | `--bare -p --tools "" --no-session-persistence`, Prompt via stdin |
+| OpenAI Codex (`codex`) | `codex login` | `exec --sandbox read-only --json -`, Prompt via stdin |
+| Gemini CLI (`gemini`) | „Sign in with Google“ | `--output-format json --sandbox`, Prompt via stdin |
 | Copilot CLI (`copilot`) | `/login` in interaktiver Session | `-p --deny-tool=write --deny-tool=shell` |
+
+Der Prompt (mit ungefiltertem Twitch-Chat) geht bei Claude/Codex/Gemini über
+**stdin** statt als Kommandozeilen-Argument. Das verhindert, dass cmd.exe bei
+npm-`.cmd`-Shims unter Windows Metazeichen aus Chat-Nachrichten interpretiert
+(„BatBadBut“). Für Copilot (argv-Prompt) werden bei `.cmd`/`.bat`-Shims alle
+cmd-Metazeichen aus dem Prompt entfernt.
 
 Consumer-Abo ≠ API. Die CLIs laufen über dein bereits angemeldetes Abo;
 die Browser-/OAuth-Verbindung läuft per HTTPS im jeweiligen offiziellen CLI.

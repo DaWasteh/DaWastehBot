@@ -41,6 +41,12 @@ T_COPILOT = "copilot_cli"
 
 ALL_CLI_TRANSPORTS = frozenset({T_CLAUDE, T_CODEX, T_GEMINI, T_COPILOT})
 
+# Transports whose CLI reads the prompt from stdin. Chat text NEVER goes on the
+# command line for these: on Windows npm installs .cmd shims, and cmd.exe can
+# re-interpret argv metacharacters ("BatBadBut") -- with untrusted Twitch chat
+# in the prompt that would be a command-injection vector.
+STDIN_PROMPT_TRANSPORTS = frozenset({T_CLAUDE, T_CODEX, T_GEMINI})
+
 # --------------------------------------------------------------------------- #
 #  Static model suggestions for dropdowns (always editable in the GUI)
 # --------------------------------------------------------------------------- #
@@ -177,6 +183,8 @@ def build_claude_command(model: str, timeout: float = 45) -> list[str]:
     ``--tools ""`` removes ALL built-in tools so Claude cannot read/write files
     or run shell commands -- it can only produce text.
     ``--no-session-persistence`` prevents disk-stored sessions.
+    The prompt itself is piped via stdin (``claude -p`` without a positional
+    prompt reads stdin), never placed on the command line.
     """
     exe = find_cli("claude")
     if not exe:
@@ -184,7 +192,7 @@ def build_claude_command(model: str, timeout: float = 45) -> list[str]:
     return [
         exe,
         "--bare",
-        "-p",  # print/headless mode
+        "-p",  # print/headless mode; prompt kommt über stdin
         "--output-format",
         "json",
         "--model",
@@ -200,7 +208,7 @@ def build_codex_command(model: str, timeout: float = 45) -> list[str]:
 
     ``--sandbox read-only`` prevents file writes and shell execution.
     ``--json`` gives newline-delimited JSON events for parsing.
-    The prompt is passed as a positional argument (never via shell).
+    The prompt is piped via stdin (positional ``-`` = read prompt from stdin).
     """
     exe = find_cli("codex")
     if not exe:
@@ -214,13 +222,15 @@ def build_codex_command(model: str, timeout: float = 45) -> list[str]:
         "read-only",
         "--skip-git-repo-check",
         "--json",
+        "-",  # Prompt aus stdin lesen
     ]
 
 
 def build_gemini_command(model: str, timeout: float = 45) -> list[str]:
     """Build a headless Gemini CLI command.
 
-    ``-p`` enters headless mode (non-interactive).
+    Piped stdin puts the CLI into non-interactive mode automatically; the
+    prompt is delivered via stdin, never as a command-line argument.
     ``--output-format json`` returns structured JSON with a ``response`` field.
     """
     exe = find_cli("gemini")
@@ -235,7 +245,6 @@ def build_gemini_command(model: str, timeout: float = 45) -> list[str]:
         "--sandbox",
         "--approval-mode",
         "plan",
-        "-p",  # prompt value is appended by run_cli
     ]
 
 
@@ -245,6 +254,9 @@ def build_copilot_command(model: str, timeout: float = 45) -> list[str]:
     ``-p`` is the programmatic/prompt mode.
     Tools are explicitly denied to prevent autonomous file/shell actions.
     Never uses ``--allow-all-tools``.
+    Copilot reads the prompt as argv value of ``-p``; because npm installs a
+    ``.cmd`` shim on Windows, ``run_cli`` strips cmd.exe metacharacters from
+    the prompt in that case (see ``_argv_safe_prompt``).
     """
     exe = find_cli("copilot")
     if not exe:
@@ -606,30 +618,55 @@ class CLIResult:
     timed_out: bool = False
 
 
+def _argv_safe_prompt(executable: str, prompt: str) -> str:
+    """Neutralise cmd.exe metacharacters when the target is a ``.cmd``/``.bat`` shim.
+
+    Windows startet Batch-Dateien über cmd.exe, das Argumente NACH dem Quoting
+    erneut interpretiert ("BatBadBut"). Da der Prompt ungefilterten Twitch-Chat
+    enthält, werden für Batch-Shims alle cmd-Metazeichen entfernt und
+    Zeilenumbrüche zu ``  |  `` (visueller Trenner) zusammengefaltet. Für echte
+    ``.exe``-Binaries bleibt der Prompt unverändert.
+    """
+    if sys.platform == "win32" and executable.lower().endswith((".cmd", ".bat")):
+        prompt = re.sub(r"[\r\n]+", "  /  ", prompt)
+        prompt = re.sub(r'[%!^"<>&|]', "", prompt)
+    return prompt
+
+
 async def run_cli(
     args: list[str],
     prompt: str,
     *,
     timeout: float = 45,
+    prompt_via_stdin: bool = False,
 ) -> CLIResult:
-    """Run a CLI command with the prompt as the last positional argument.
+    """Run a CLI command, delivering the prompt via stdin or as final argument.
 
     Uses ``asyncio.create_subprocess_exec`` (never ``shell=True``).
-    The prompt is passed as the final argument after the pre-built arg list.
-    On timeout, the process is killed.
+    With ``prompt_via_stdin`` the prompt is piped to the process; otherwise it
+    is appended as the final argument (metacharacter-stripped for ``.cmd``
+    shims, see ``_argv_safe_prompt``). On timeout, the process is killed.
     """
-    full_args = args + [prompt]
+    if prompt_via_stdin:
+        full_args = list(args)
+        stdin_data: bytes | None = prompt.encode("utf-8", errors="replace")
+    else:
+        full_args = args + [_argv_safe_prompt(args[0], prompt)]
+        stdin_data = None
     # Never expose the repository or user files as the agent workspace. Even
     # read-only coding CLIs can discover project instructions or account tools.
     with tempfile.TemporaryDirectory(prefix="pandabot-cli-") as isolated_cwd:
         proc = await asyncio.create_subprocess_exec(
             *full_args,
+            stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=isolated_cwd,
         )
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(input=stdin_data), timeout=timeout
+            )
         except TimeoutError:
             proc.kill()
             await proc.wait()
@@ -662,7 +699,12 @@ async def cli_complete(
         return None
 
     prompt = pack_prompt(system_prompt, turns)
-    result = await run_cli(base_args, prompt, timeout=timeout)
+    result = await run_cli(
+        base_args,
+        prompt,
+        timeout=timeout,
+        prompt_via_stdin=transport in STDIN_PROMPT_TRANSPORTS,
+    )
 
     if result.timed_out or result.returncode != 0:
         return None

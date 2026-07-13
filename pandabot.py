@@ -17,6 +17,7 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -533,11 +534,16 @@ class LLMClient:
         self._apply_control_data(data)
 
     def _apply_control_data(self, data: dict[str, Any]) -> None:
-        """Apply a control-file dict to the global ``settings``."""
+        """Apply a control-file dict to the global ``settings``.
+
+        Der API-Key steht bewusst NICHT in der Control-Datei; er wird hier
+        über ``llm_profiles.json`` bzw. die ``.env`` aufgelöst. Wichtig ist
+        auch das Zurücksetzen bei leerem Ergebnis: Der Key des vorherigen
+        Profils darf nie an den Endpoint eines anderen Anbieters gehen.
+        """
         key_map = {
             "endpoint": "llm_url",
             "model": "llm_model",
-            "api_key": "llm_api_key",
             "max_tokens": "llm_max_tokens",
             "temperature": "llm_temperature",
             "top_p": "llm_top_p",
@@ -551,6 +557,13 @@ class LLMClient:
         for src, dst in key_map.items():
             if src in data and data[src] is not None:
                 setattr(settings, dst, data[src])
+        try:
+            from llm_profiles import resolve_control_api_key
+
+            settings.llm_api_key = resolve_control_api_key(data) or None
+        except Exception:  # noqa: BLE001 - Profilwechsel darf den Bot nie crashen
+            LOGGER.exception("API-Key für Profilwechsel konnte nicht aufgelöst werden")
+            settings.llm_api_key = None
         if data.get("profile_name"):
             settings.llm_backend_label = data["profile_name"]
             LOGGER.info("LLM-Profil gewechselt: %s", data["profile_name"])
@@ -2448,12 +2461,36 @@ def _select_llm_backend() -> None:
     LOGGER.info("LLM-Profil: %s", settings.llm_backend_label)
 
 
+def _watch_gui_stdin(bot: PandaBot) -> None:
+    """GUI-Modus: fährt den Bot sauber herunter, wenn die GUI stdin schließt.
+
+    Die GUI startet den Bot ohne sichtbares Konsolenfenster (CREATE_NO_WINDOW);
+    Konsolen-Signale wie CTRL_BREAK funktionieren dann nicht zuverlässig.
+    Stattdessen hält die GUI die stdin-Pipe offen und schließt sie zum Stoppen -
+    das EOF hier ist das Shutdown-Signal.
+    """
+    if os.getenv("PANDABOT_GUI_CONTROL") != "1":
+        return
+    loop = asyncio.get_running_loop()
+
+    def _wait_for_eof() -> None:
+        try:
+            sys.stdin.buffer.read()
+        except Exception:  # noqa: BLE001 - stdin kann in Sonderfällen fehlen
+            pass
+        LOGGER.info("GUI hat stdin geschlossen - PandaBot fährt herunter.")
+        loop.call_soon_threadsafe(lambda: loop.create_task(bot.close()))
+
+    threading.Thread(target=_wait_for_eof, name="gui-stdin-watch", daemon=True).start()
+
+
 def main() -> None:
     twitchio.utils.setup_logging(level=logging.INFO)
     _select_llm_backend()
 
     async def runner() -> None:
         async with PandaBot() as bot:
+            _watch_gui_stdin(bot)
             # Lädt gespeicherte Tokens aus .tio.tokens.json (falls vorhanden).
             await bot.start()
 
